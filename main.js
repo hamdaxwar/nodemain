@@ -1,3 +1,8 @@
+/**
+ * ZURA BOT PANEL - MAIN ENTRY POINT
+ * File ini mengontrol alur utama bot dan server API untuk Dashboard Android.
+ */
+
 const { fork } = require('child_process');
 const cron = require('node-cron');
 const config = require('./config');
@@ -8,7 +13,7 @@ const { state, playwrightLock } = require('./helpers/state');
 const commands = require('./handlers/commands');
 const callbacks = require('./handlers/callbacks');
 
-// Modules
+// Modules Internal
 const rangeModule = require('./range.js');
 const messageModule = require('./message.js');
 const smsModule = require('./sms.js');
@@ -17,78 +22,89 @@ const aideApp = require('./aideApp.js');
 let telegramLoopInterval = null;
 let expiryInterval = null;
 
-// --- Bot Control Functions ---
+// --- Fungsi Kontrol Bot ---
 
 async function startBot() {
     if (state.isBotRunning) {
-        console.log("Bot already running.");
+        console.log("[MAIN] Bot sudah berjalan.");
         return;
     }
 
-    // Cek kelengkapan Config
-    if (!config.BOT_TOKEN) {
-        console.log("BOT_TOKEN missing in config. Please set via App.");
-        state.statusText = "Missing Config";
+    // Cek kelengkapan Config sebelum running bot inti
+    if (!config.BOT_TOKEN || config.BOT_TOKEN === "") {
+        console.log("[WARNING] BOT_TOKEN kosong. Bot tidak bisa start.");
+        state.statusText = "Konfigurasi Belum Lengkap";
         return;
     }
 
     state.isBotRunning = true;
-    state.statusText = "Starting...";
-    console.log("[MAIN] Starting Bot System...");
+    state.statusText = "Memulai...";
+    console.log("[MAIN] Menyalakan Sistem Bot...");
 
-    db.initializeFiles();
-
-    // 1. Start Browser
     try {
-        await scraper.initBrowser();
-        state.statusText = "Browser Active";
-    } catch (e) {
-        state.statusText = "Browser Error";
-        console.error("Browser Init Failed:", e);
-        // Continue anyway to allow retry
+        db.initializeFiles();
+
+        // 1. Inisialisasi Browser
+        try {
+            await scraper.initBrowser();
+            state.statusText = "Browser Aktif";
+        } catch (e) {
+            state.statusText = "Browser Error";
+            console.error("[ERROR] Browser Gagal:", e.message);
+        }
+
+        // 2. Start Modules (Range, Message, SMS)
+        rangeModule.start();
+        messageModule.start();
+        smsModule.start();
+
+        // 3. Start Telegram Polling & Expiry Monitor
+        startTelegramLoop();
+        startExpiryMonitor();
+        
+        state.statusText = "Running";
+        console.log("[MAIN] Semua Sistem Online.");
+    } catch (err) {
+        console.error("[FATAL ERROR] Gagal memulai bot:", err);
+        state.isBotRunning = false;
+        state.statusText = "Error";
     }
-
-    // 2. Start Modules
-    rangeModule.start();
-    messageModule.start();
-    smsModule.start();
-
-    // 3. Start Telegram Polling
-    startTelegramLoop();
-    startExpiryMonitor();
-    
-    state.statusText = "Running";
-    console.log("[MAIN] All Systems Online.");
 }
 
 async function stopBot() {
+    if (!state.isBotRunning) return;
+
     state.isBotRunning = false;
-    state.statusText = "Stopping...";
-    console.log("[MAIN] Stopping Bot System...");
+    state.statusText = "Berhenti...";
+    console.log("[MAIN] Mematikan Sistem Bot...");
 
-    // Stop Modules
-    rangeModule.stop();
-    messageModule.stop();
-    smsModule.stop();
+    // Hentikan Modul
+    if (rangeModule.stop) rangeModule.stop();
+    if (messageModule.stop) messageModule.stop();
+    if (smsModule.stop) smsModule.stop();
 
-    // Stop Loops
-    if (telegramLoopInterval) clearInterval(telegramLoopInterval);
+    // Hentikan Loop
+    if (telegramLoopInterval) {
+        // Logika penghentian loop telegram
+        telegramLoopInterval = null;
+    }
     if (expiryInterval) clearInterval(expiryInterval);
 
-    // Close Browser
+    // Tutup Browser
     if (state.browser) {
         try { await state.browser.close(); } catch(e){}
         state.browser = null;
     }
 
     state.statusText = "Stopped";
-    console.log("[MAIN] Bot Stopped.");
+    console.log("[MAIN] Bot Berhasil Dimatikan.");
 }
 
 async function restartBot() {
+    console.log("[MAIN] Memulai ulang sistem...");
     await stopBot();
-    config.reload(); // Reload bot_config.json
-    console.log("[MAIN] Config Reloaded.");
+    // Reload konfigurasi dari file bot_config.json
+    if (config.reload) config.reload(); 
     await new Promise(r => setTimeout(r, 2000));
     await startBot();
 }
@@ -101,6 +117,8 @@ function startExpiryMonitor() {
         if (!state.isBotRunning) return;
         try {
             const waitList = db.loadWaitList();
+            if (!waitList) return;
+            
             const now = Date.now() / 1000;
             const updatedList = [];
             for (const item of waitList) {
@@ -108,7 +126,8 @@ function startExpiryMonitor() {
                     updatedList.push(item);
                     continue;
                 }
-                if (now - item.timestamp > 1200) { // 20 Menit
+                // Kadaluarsa setelah 20 Menit
+                if (now - item.timestamp > 1200) { 
                     const msgId = await tg.tgSend(item.user_id, `⚠️ Nomor <code>${item.number}</code> telah kadaluarsa.`);
                     if (msgId) setTimeout(() => tg.tgDelete(item.user_id, msgId), 30000);
                 } else {
@@ -116,21 +135,21 @@ function startExpiryMonitor() {
                 }
             }
             db.saveWaitList(updatedList);
-        } catch (e) {}
+        } catch (e) {
+            console.error("[EXPIRY ERROR]", e.message);
+        }
     }, 15000);
 }
 
 function startTelegramLoop() {
-    if (telegramLoopInterval) return; // Prevent double loop inside same process
-    
-    // Kita gunakan logic async loop di dalam, tapi dikontrol flag isBotRunning
-    // agar tidak blocking main thread
+    if (telegramLoopInterval) return;
     
     let offset = 0;
-    // Bersihkan update lama
+    // Bersihkan update lama agar tidak banjir saat start
     tg.tgGetUpdates(-1).catch(()=>{});
 
     const loop = async () => {
+        telegramLoopInterval = true; 
         while (state.isBotRunning) {
             try {
                 const data = await tg.tgGetUpdates(offset);
@@ -143,29 +162,27 @@ function startTelegramLoop() {
                 }
             } catch (e) {
                 if (e.response && e.response.status === 429) {
-                    await new Promise(r => setTimeout(r, 10000));
+                    await new Promise(r => setTimeout(r, 10000)); // Delay jika hit rate limit
                 }
             }
             await new Promise(r => setTimeout(r, 1000));
         }
-        telegramLoopInterval = null; // Reset saat loop mati
+        telegramLoopInterval = null;
     };
     
-    // Jalankan loop non-blocking
-    telegramLoopInterval = true; // Mark as active
     loop();
 }
 
+// --- Jalankan Server & Inisialisasi ---
 
-// --- Main Entry Point ---
-
-// 1. Jalankan API Server untuk Dashboard
+// 1. Jalankan API Server untuk Dashboard (Harus paling atas agar HP bisa konek)
+console.log("[AIDE] Menjalankan API Server...");
 aideApp.startServer();
 
-// 2. Cron Job Refresh Browser (07:00 WIB)
+// 2. Jadwalkan Refresh Browser (07:00 WIB)
 cron.schedule('0 7 * * *', async () => {
     if (state.isBotRunning) {
-        console.log("[CRON] Refreshing Browser...");
+        console.log("[CRON] Merefresh Browser...");
         const release = await playwrightLock.acquire();
         try { await scraper.initBrowser(); } 
         catch (e) { console.error("[CRON ERROR]", e.message); } 
@@ -173,14 +190,13 @@ cron.schedule('0 7 * * *', async () => {
     }
 }, { scheduled: true, timezone: "Asia/Jakarta" });
 
-// 3. Auto-Start jika config valid
-if (config.BOT_TOKEN) {
+// 3. Auto-Start Bot jika token sudah tersedia
+if (config.BOT_TOKEN && config.BOT_TOKEN !== "") {
     startBot();
 } else {
-    state.statusText = "Waiting Config";
-    console.log("[MAIN] Bot Token belum diset. Silahkan setup via App Dashboard.");
+    state.statusText = "Menunggu Konfigurasi";
+    console.log("[MAIN] Bot Token belum diatur. Server Dashboard tetap aktif, silakan atur melalui Aplikasi HP.");
 }
 
-// Export untuk diakses oleh aideApp.js
+// Export fungsi agar bisa dipanggil oleh aideApp.js (Remote Action)
 module.exports = { startBot, stopBot, restartBot };
-
