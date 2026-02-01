@@ -1,38 +1,53 @@
 const dotenv = require('dotenv');
 const path = require('path');
+const fs = require('fs');
 
 // Load Env
 dotenv.config();
 
-// Load Configs Eksternal (asumsi file ini ada di root sejajar dengan config.js)
-const HEADLESS_CONFIG = require('./headless.js'); 
-const GLOBAL_COUNTRY_EMOJI = require('./country.json');
+// Load Configs Eksternal
+// Gunakan try-catch agar tidak crash jika file belum ada
+let HEADLESS_CONFIG = { headless: true };
+try { HEADLESS_CONFIG = require('./headless.js'); } catch(e){}
+
+let GLOBAL_COUNTRY_EMOJI = {};
+try { GLOBAL_COUNTRY_EMOJI = require('./country.json'); } catch(e){}
 
 // Validasi Env
 const requiredEnv = ['BOT_TOKEN', 'GROUP_ID_1', 'GROUP_ID_2', 'ADMIN_ID', 'STEX_EMAIL', 'STEX_PASSWORD'];
 const missingEnv = requiredEnv.filter(key => !process.env[key]);
 
 if (missingEnv.length > 0) {
-    console.error(`[FATAL] Variabel lingkungan berikut belum lengkap: ${missingEnv.join(', ')}`);
-    process.exit(1);
+    // Kita ganti console.error ke log biasa dan HAPUS process.exit(1)
+    console.log(`[WARNING] Konfigurasi belum lengkap: ${missingEnv.join(', ')}`);
+    console.log(`[AIDE] Server Dashboard tetap berjalan. Silakan lengkapi melalui App.`);
 }
 
 module.exports = {
-    // API & IDs
-    BOT_TOKEN: process.env.BOT_TOKEN,
-    API_URL: `https://api.telegram.org/bot${process.env.BOT_TOKEN}`,
-    GROUP_ID_1: parseInt(process.env.GROUP_ID_1),
-    GROUP_ID_2: parseInt(process.env.GROUP_ID_2),
-    ADMIN_ID: parseInt(process.env.ADMIN_ID),
+    // Fungsi untuk reload ENV jika diupdate dari App tanpa restart manual
+    reload: function() {
+        const envConfig = dotenv.parse(fs.readFileSync('.env'));
+        for (const k in envConfig) {
+            process.env[k] = envConfig[k];
+        }
+        console.log("[CONFIG] Environment variables reloaded.");
+    },
+
+    // API & IDs (Gunakan fallback string kosong agar tidak error undefined)
+    BOT_TOKEN: process.env.BOT_TOKEN || "",
+    API_URL: `https://api.telegram.org/bot${process.env.BOT_TOKEN || ""}`,
+    GROUP_ID_1: parseInt(process.env.GROUP_ID_1) || 0,
+    GROUP_ID_2: parseInt(process.env.GROUP_ID_2) || 0,
+    ADMIN_ID: parseInt(process.env.ADMIN_ID) || 0,
     
     // STEX Credentials
-    STEX_EMAIL: process.env.STEX_EMAIL,
-    STEX_PASSWORD: process.env.STEX_PASSWORD,
+    STEX_EMAIL: process.env.STEX_EMAIL || "",
+    STEX_PASSWORD: process.env.STEX_PASSWORD || "",
 
     // URLs
     LOGIN_URL: "https://stexsms.com/mauth/login",
     TARGET_URL: "https://stexsms.com/mdashboard/getnum",
-    BOT_USERNAME_LINK: "https://t.me/myzuraisgoodbot", // Sesuaikan jika perlu
+    BOT_USERNAME_LINK: "https://t.me/myzuraisgoodbot", 
     GROUP_LINK_1: "https://t.me/+E5grTSLZvbpiMTI1",
     GROUP_LINK_2: "https://t.me/zura14g",
 
