@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
-const HEADLESS_CONFIG = require('./headless.js'); 
-const GLOBAL_COUNTRY_EMOJI = require('./country.json');
+const HEADLESS_CONFIG = require('../headless.js'); 
+const GLOBAL_COUNTRY_EMOJI = require('../country.json');
 
 const CONFIG_FILE = path.join(__dirname, 'bot_config.json');
 
