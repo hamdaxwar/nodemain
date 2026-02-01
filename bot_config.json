@@ -1,0 +1,20 @@
+{
+  "BOT_TOKEN": "",
+  "BOT_TOKEN_MESSAGE": "",
+  "BOT_TOKEN_RANGE": "",
+  "CHAT_ID_MESSAGE": "",
+  "CHAT_ID_RANGE": "",
+  "ADMIN_ID": "",
+  "GROUP_ID_1": "",
+  "GROUP_ID_2": "",
+  "URL_ADMIN": "https://t.me/",
+  "URL_GETNUM": "https://t.me/",
+  "URL_GRUP_OTP": "https://t.me/",
+  "EMAIL": "",
+  "PASSWORD": "",
+  "URL_LOGIN": "https://stexsms.com/mauth/login",
+  "URL_TARGET_GETNUM": "https://stexsms.com/mdashboard/getnum",
+  "URL_TARGET_RANGE": "https://stexsms.com/mdashboard/console",
+  "URL_TARGET_MESSAGE": "https://stexsms.com/mdashboard/getnum"
+}
+
