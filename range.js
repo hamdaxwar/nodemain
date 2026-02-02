@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { state } = require('./helpers/state'); 
 
-// ================= KONFIGURASI MANDIRI =================
+// ================= KONFIGURASI =================
 const CONFIG_PATH = path.join(process.cwd(), 'bot_config.json');
 const INLINE_JSON_PATH = path.join(process.cwd(), 'inline.json');
 const COUNTRY_EMOJI = require('./country.json');
@@ -30,14 +30,10 @@ function loadConfigFromFile() {
             sessionConfig.botLink = fixUrl(json.URL_GETNUM);
             sessionConfig.targetUrl = json.URL_TARGET_RANGE;
             sessionConfig.urlAdmin = fixUrl(json.URL_ADMIN);
-            
-            if (!sessionConfig.targetUrl) {
-                console.error("[RANGE] Warning: URL_TARGET_RANGE kosong di bot_config.json");
-            }
             return true;
         }
     } catch (err) {
-        console.error("[RANGE] Error Config:", err.message);
+        console.error("[RANGE] Gagal memuat konfigurasi:", err.message);
     }
     return false;
 }
@@ -121,94 +117,110 @@ async function processQueue() {
     IS_PROCESSING_QUEUE = false;
 }
 
+// ================= SCRAPER ENGINE =================
+
+async function performScrape() {
+    if (!monitorPage || monitorPage.isClosed()) return;
+    
+    try {
+        const currentUrl = monitorPage.url();
+        if (currentUrl === "about:blank" || (!currentUrl.includes(sessionConfig.targetUrl) && currentUrl !== "about:blank")) {
+            console.log(`[RANGE] Mengarahkan ke target: ${sessionConfig.targetUrl}`);
+            await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+            return; 
+        }
+
+        const cards = await monitorPage.locator('div.group.flex.flex-col').all();
+
+        for (const card of cards) {
+            try {
+                const service = await card.locator('span.text-blue-400, span.text-green-400').first().innerText().catch(() => "");
+                const serviceUpper = service.toUpperCase();
+
+                if (serviceUpper.includes("FACEBOOK") || serviceUpper.includes("WHATSAPP")) {
+                    const infoBlock = await card.locator('span.text-slate-600').first().innerText().catch(() => "");
+                    const parts = infoBlock.split("•");
+                    const range = parts[0]?.trim() || "";
+                    const country = parts[1]?.trim() || "Unknown";
+                    const message = await card.locator('p.font-mono').innerText().catch(() => "");
+
+                    if (!range.includes("XXX")) continue;
+
+                    const cacheKey = `${range}_${message.substring(0, 20)}`;
+                    if (!CACHE_SET.has(cacheKey)) {
+                        CACHE_SET.add(cacheKey);
+
+                        const stats = SENT_MESSAGES.get(range) || { count: 0 };
+                        const newCount = stats.count + 1;
+                        SENT_MESSAGES.set(range, { ...stats, count: newCount });
+
+                        updateInlineJson(range, country, service);
+
+                        const emoji = getEmoji(country);
+                        const rangeText = newCount > 1 ? `<code>${range}</code> <b>(x${newCount})</b>` : `<code>${range}</code>`;
+
+                        const text = `🔥 <b>Live Message New Range</b>\n\n` +
+                                    `📱 Range: ${rangeText}\n` +
+                                    `${emoji} Negara: ${escapeHtml(country.toUpperCase())}\n` +
+                                    `⚙️ Layanan: <b>${service}</b>\n\n` +
+                                    `🗯️ <b>Pesan:</b>\n` +
+                                    `<blockquote>${escapeHtml(message.replace('➜', '').trim())}</blockquote>`;
+
+                        console.log(`[RANGE] Hit: ${range} (${country})`);
+                        MESSAGE_QUEUE.push({ rangeKey: range, text });
+                        processQueue();
+                    }
+                }
+            } catch (e) {}
+        }
+    } catch (e) {
+        console.error("[RANGE] Gagal melakukan scraping:", e.message);
+    }
+}
+
 // ================= MAIN MONITOR =================
 
 async function start() {
     if (monitorLoop) return; 
     loadConfigFromFile();
-    console.log("🚀 [RANGE] Module Scraper Aktif.");
+    
+    console.log("🚀 [RANGE] Mencari ketersediaan browser...");
 
-    monitorLoop = setInterval(async () => {
-        if (!state.browser) return;
-        loadConfigFromFile();
-
-        // 1. Logika Refresh Jam 07:00 WIB
-        const now = new Date();
-        const jktTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Jakarta"}));
-        if (jktTime.getHours() === 7 && jktTime.getMinutes() === 0 && jktTime.getSeconds() < 15) {
-            if (monitorPage) {
-                console.log("[RANGE] Jadwal Refresh Harian (07:00 WIB)...");
-                await monitorPage.reload({ waitUntil: 'networkidle' }).catch(() => {});
-            }
-        }
-
-        try {
-            // 2. Inisialisasi Tab jika belum ada
-            if (!monitorPage || monitorPage.isClosed()) {
+    // Menunggu browser aktif
+    const checkState = setInterval(async () => {
+        if (state.browser) {
+            clearInterval(checkState);
+            console.log("✅ [RANGE] Browser terdeteksi. Menyiapkan tab dalam 5 detik...");
+            
+            setTimeout(async () => {
                 const context = state.browser.contexts()[0] || await state.browser.newContext();
                 monitorPage = await context.newPage();
-                // Langsung arahkan jika URL valid
+                
                 if (sessionConfig.targetUrl) {
+                    console.log(`[RANGE] Langsung menuju: ${sessionConfig.targetUrl}`);
                     await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+                    // Eksekusi scraping pertama kali secara instan
+                    await performScrape();
                 }
-            }
 
-            if (!sessionConfig.targetUrl) return;
+                // Jalankan interval pemantauan rutin
+                monitorLoop = setInterval(async () => {
+                    loadConfigFromFile();
 
-            // 3. Proteksi about:blank atau URL melenceng
-            const currentUrl = monitorPage.url();
-            if (currentUrl === "about:blank" || (!currentUrl.includes(sessionConfig.targetUrl) && currentUrl !== "about:blank")) {
-                console.log(`[RANGE] Mengarahkan ulang ke: ${sessionConfig.targetUrl}`);
-                await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
-                return; // Tunggu siklus berikutnya agar halaman termuat sempurna
-            }
-
-            // 4. Proses Scraping
-            const cards = await monitorPage.locator('div.group.flex.flex-col').all();
-
-            for (const card of cards) {
-                try {
-                    const service = await card.locator('span.text-blue-400, span.text-green-400').first().innerText().catch(() => "");
-                    const serviceUpper = service.toUpperCase();
-
-                    if (serviceUpper.includes("FACEBOOK") || serviceUpper.includes("WHATSAPP")) {
-                        const infoBlock = await card.locator('span.text-slate-600').first().innerText().catch(() => "");
-                        const parts = infoBlock.split("•");
-                        const range = parts[0]?.trim() || "";
-                        const country = parts[1]?.trim() || "Unknown";
-                        const message = await card.locator('p.font-mono').innerText().catch(() => "");
-
-                        if (!range.includes("XXX")) continue;
-
-                        const cacheKey = `${range}_${message.substring(0, 20)}`;
-                        if (!CACHE_SET.has(cacheKey)) {
-                            CACHE_SET.add(cacheKey);
-
-                            const stats = SENT_MESSAGES.get(range) || { count: 0 };
-                            const newCount = stats.count + 1;
-                            SENT_MESSAGES.set(range, { ...stats, count: newCount });
-
-                            updateInlineJson(range, country, service);
-
-                            const emoji = getEmoji(country);
-                            const rangeText = newCount > 1 ? `<code>${range}</code> <b>(x${newCount})</b>` : `<code>${range}</code>`;
-
-                            const text = `🔥 <b>Live Message New Range</b>\n\n` +
-                                        `📱 Range: ${rangeText}\n` +
-                                        `${emoji} Negara: ${escapeHtml(country.toUpperCase())}\n` +
-                                        `⚙️ Service: <b>${service}</b>\n\n` +
-                                        `🗯️ <b>Message:</b>\n` +
-                                        `<blockquote>${escapeHtml(message.replace('➜', '').trim())}</blockquote>`;
-
-                            console.log(`[RANGE] Hit: ${range} (${country})`);
-                            MESSAGE_QUEUE.push({ rangeKey: range, text });
-                            processQueue();
-                        }
+                    // Jadwal Refresh 07:00 WIB
+                    const now = new Date();
+                    const jktTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Jakarta"}));
+                    if (jktTime.getHours() === 7 && jktTime.getMinutes() === 0 && jktTime.getSeconds() < 15) {
+                        console.log("[RANGE] Jadwal Refresh Harian (07:00 WIB)...");
+                        await monitorPage.reload({ waitUntil: 'networkidle' }).catch(() => {});
                     }
-                } catch (e) {}
-            }
-        } catch (e) {}
-    }, 15000); 
+
+                    await performScrape();
+                }, 15000); 
+
+            }, 5000); // Jeda 5 detik sesudah browser terdeteksi
+        }
+    }, 1000);
 }
 
 function stop() {
@@ -216,6 +228,7 @@ function stop() {
         clearInterval(monitorLoop);
         monitorLoop = null;
         if (monitorPage) monitorPage.close().catch(() => {});
+        console.log("🛑 [RANGE] Module Stopped.");
     }
 }
 
