@@ -1,8 +1,10 @@
 const fs = require('fs');
 const axios = require('axios');
 const path = require('path');
-const config = require('../config');
-const { state } = require('./state');
+// PERBAIKAN: Karena sms.js ada di root, panggil config.js di folder yang sama
+const config = require('./config'); 
+// Sesuaikan juga path ke helpers/state
+const { state } = require('./helpers/state'); 
 
 let smsLoop = null;
 
@@ -38,7 +40,6 @@ function updateProfileOtp(userId) {
     if (p.last_active !== today) { p.otp_hari_ini = 0; p.last_active = today; }
 
     const oldBal = parseFloat(p.balance || 0.0);
-    // Harga OTP mengikuti state (bot_config.json)
     const otpPrice = parseFloat(state.OTP_PRICE || 0.003500);
     
     p.otp_semua = (p.otp_semua || 0) + 1;
