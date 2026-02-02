@@ -1,37 +1,49 @@
 const fs = require('fs');
 const path = require('path');
 
-// PERBAIKAN: Gunakan ../ karena state.js ada di dalam folder helpers
-const CONFIG_FILE = path.join(__dirname, '../bot_config.json');
+// Gunakan path.join(process.cwd()) agar selalu merujuk ke root folder aplikasi
+const CONFIG_FILE = path.join(process.cwd(), 'bot_config.json');
 
 function loadRawConfig() {
     try {
         if (fs.existsSync(CONFIG_FILE)) {
             const data = fs.readFileSync(CONFIG_FILE, 'utf8');
             return JSON.parse(data);
-        } else {
-            // Log ini akan muncul jika path masih salah
-            console.error(`[STATE] File TIDAK ditemukan di: ${CONFIG_FILE}`);
         }
     } catch (e) {
-        console.error("[STATE] Gagal parsing JSON:", e.message);
+        console.error("[STATE] Gagal membaca bot_config.json:", e.message);
     }
     return {};
 }
 
+// Inisialisasi variabel Set/Object di luar agar tidak terhapus saat reload
+const _verifiedUsers = new Set();
+const _manualRangeInput = new Set();
+const _waitingDanaInput = new Set();
+const _waitingAdminInput = new Set();
+const _waitingBroadcastInput = new Set();
+const _get10RangeInput = new Set();
+
 const state = {
-    // Properti Set harus diinisialisasi agar .has() tidak undefined
-    verifiedUsers: new Set(),
-    manualRangeInput: new Set(),
-    waitingDanaInput: new Set(),
+    // Properti Set (Getter agar selalu valid)
+    get verifiedUsers() { return _verifiedUsers; },
+    get manualRangeInput() { return _manualRangeInput; },
+    get waitingDanaInput() { return _waitingDanaInput; },
+    get waitingAdminInput() { return _waitingAdminInput; },
+    get waitingBroadcastInput() { return _waitingBroadcastInput; },
+    get get10RangeInput() { return _get10RangeInput; },
+
+    // Properti Objek Pendukung
     pendingMessage: {},
+    broadcastMessage: {},
     lastUsedRange: {},
 
+    // Status Bot
     isBotRunning: false,
     statusText: "Idle",
     browser: null,
     
-    // Properti Dinamis
+    // Properti dari JSON
     BOT_TOKEN: "",
     API_URL: "",
     ADMIN_ID: "",
@@ -44,10 +56,12 @@ const state = {
     GROUP_ID_1: "",
     GROUP_LINK_1: "",
 
+    /**
+     * Memperbarui data dari file JSON tanpa merusak variabel Set di atas
+     */
     reload: function() {
         const conf = loadRawConfig();
         
-        // Update manual agar properti Set di atas tidak tertimpa/hilang
         this.BOT_TOKEN = conf.BOT_TOKEN_GETNUM || "";
         this.API_URL = this.BOT_TOKEN ? `https://api.telegram.org/bot${this.BOT_TOKEN}` : "";
         
@@ -63,7 +77,7 @@ const state = {
         this.GROUP_ID_1 = conf.GROUP_ID_1 || "";
         this.GROUP_LINK_1 = conf.URL_GRUP_OTP || "";
 
-        console.log("[STATE] Sinkronisasi bot_config.json selesai.");
+        console.log("[STATE] Sinkronisasi bot_config.json Berhasil.");
     },
 
     OTP_PRICE: 0.003500,
@@ -84,7 +98,7 @@ const state = {
     }
 };
 
-// Eksekusi reload pertama kali
+// Panggil reload pertama kali
 state.reload();
 
 module.exports = { state, playwrightLock: state.playwrightLock };
