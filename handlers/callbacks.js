@@ -1,8 +1,24 @@
+const fs = require('fs');
+const path = require('path');
 const config = require('../config');
 const db = require('../helpers/database');
 const tg = require('../helpers/telegram');
 const { state } = require('../helpers/state');
 const scraper = require('../helpers/scraper');
+
+const BOT_CONFIG_PATH = path.join(__dirname, '../../bot_config.json');
+
+/**
+ * Helper untuk membaca konfigurasi dari JSON secara langsung (Live)
+ */
+const getLiveConfig = () => {
+    try {
+        if (fs.existsSync(BOT_CONFIG_PATH)) {
+            return JSON.parse(fs.readFileSync(BOT_CONFIG_PATH, 'utf-8'));
+        }
+    } catch (e) {}
+    return {};
+};
 
 function generateInlineKeyboard(ranges) {
     const keyboard = [];
@@ -25,11 +41,17 @@ async function processCallback(cq) {
     const usernameTg = cq.from.username;
     const mention = usernameTg ? `@${usernameTg}` : `<a href='tg://user?id=${userId}'>${firstName}</a>`;
 
+    // Ambil Config Terbaru
+    const liveCfg = getLiveConfig();
+    const adminUrl = liveCfg.URL_ADMIN || "https://t.me/Imr1d";
+    const groupLink1 = liveCfg.URL_GRUP_OTP || config.GROUP_LINK_1;
+    const adminId = String(liveCfg.ADMIN_ID || config.ADMIN_ID);
+
     if (dataCb === "verify") {
         if (!(await tg.isUserInBothGroups(userId))) {
             const kb = {
                 inline_keyboard: [
-                    [{ text: "📌 Gabung Grup 1", url: config.GROUP_LINK_1 }],
+                    [{ text: "📌 Gabung Grup 1", url: groupLink1 }],
                     [{ text: "📌 Gabung Grup 2", url: config.GROUP_LINK_2 }],
                     [{ text: "✅ Verifikasi Ulang", callback_data: "verify" }]
                 ]
@@ -50,7 +72,7 @@ async function processCallback(cq) {
                 `💰 <b>Balance</b> : $${prof.balance.toFixed(6)}\n`;
             const kb = {
                 inline_keyboard: [
-                    [{ text: "📲 Get Number", callback_data: "getnum" }, { text: "👨‍💼 Admin", url: "https://t.me/" }],
+                    [{ text: "📲 Get Number", callback_data: "getnum" }, { text: "👨‍💼 Admin", url: adminUrl }],
                     [{ text: "💸 Withdraw Money", callback_data: "withdraw_menu" }]
                 ]
             };
@@ -141,16 +163,16 @@ async function processCallback(cq) {
                 { text: "❌ Cancel", callback_data: `wd_act:cncl:${userId}:${amount}` }
             ]]
         };
-        await tg.tgSend(config.ADMIN_ID, msgAdmin, kbAdmin);
+        await tg.tgSend(adminId, msgAdmin, kbAdmin);
         await tg.tgEdit(chatId, menuMsgId, "✅ <b>Permintaan Withdraw Terkirim!</b>\nMenunggu persetujuan Admin..");
         return;
     }
 
     if (dataCb.startsWith("wd_act:")) {
-        if (userId !== config.ADMIN_ID) return;
+        if (String(userId) !== adminId) return;
         const parts = dataCb.split(":");
         const action = parts[1];
-        const targetId = parseInt(parts[2]);
+        const targetId = String(parts[2]);
         const amount = parseFloat(parts[3]);
 
         if (action === "apr") {
@@ -159,8 +181,8 @@ async function processCallback(cq) {
             await tg.tgSend(targetId, `<b>✅ Selamat Withdraw Anda Sukses!</b>\n\n💵 Penarikan : $${amount.toFixed(6)}\n💰 Saldo saat ini: $${prof.balance.toFixed(6)}`);
         } else if (action === "cncl") {
             const profiles = db.loadProfiles();
-            if (profiles[String(targetId)]) {
-                profiles[String(targetId)].balance += amount;
+            if (profiles[targetId]) {
+                profiles[targetId].balance += amount;
                 db.saveProfiles(profiles);
             }
             await tg.tgEdit(chatId, menuMsgId, `❌ Withdraw User ${targetId} sebesar $${amount} DIBATALKAN.`);
