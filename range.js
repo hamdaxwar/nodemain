@@ -58,33 +58,23 @@ function getEmoji(country) {
 }
 
 /**
- * Menulis data ke inline.json dengan aturan:
- * 1. Maksimal 15 range terbaru.
- * 2. Tidak ada duplikasi (jika sama, hapus yang lama, masukkan yang baru di atas).
- * 3. Konversi Service: Facebook -> FB, WhatsApp -> WA.
+ * Menulis data ke inline.json (Maks 15, No Duplicate)
  */
 function updateInlineJson(newRange, country, serviceRaw) {
     try {
         let currentData = [];
         if (fs.existsSync(INLINE_JSON_PATH)) {
-            const fileContent = fs.readFileSync(INLINE_JSON_PATH, 'utf8');
             try {
-                currentData = JSON.parse(fileContent || "[]");
-            } catch (e) {
-                currentData = [];
-            }
+                currentData = JSON.parse(fs.readFileSync(INLINE_JSON_PATH, 'utf8') || "[]");
+            } catch (e) { currentData = []; }
         }
 
-        // Konversi nama service
-        let serviceShort = "Unknown";
-        const s = serviceRaw.toUpperCase();
-        if (s.includes("FACEBOOK")) serviceShort = "FB";
-        else if (s.includes("WHATSAPP")) serviceShort = "WA";
+        let serviceShort = serviceRaw.toUpperCase().includes("FACEBOOK") ? "FB" : 
+                          (serviceRaw.toUpperCase().includes("WHATSAPP") ? "WA" : "??");
 
-        // Hapus duplikasi jika range sudah ada
+        // Filter duplikasi
         currentData = currentData.filter(item => item.range !== newRange);
 
-        // Tambahkan data baru di urutan teratas
         currentData.unshift({
             range: newRange,
             country: country.toUpperCase(),
@@ -92,12 +82,9 @@ function updateInlineJson(newRange, country, serviceRaw) {
             service: serviceShort
         });
 
-        // Batasi maksimal 15 data
-        const limitedData = currentData.slice(0, 15);
-        
-        fs.writeFileSync(INLINE_JSON_PATH, JSON.stringify(limitedData, null, 2));
+        fs.writeFileSync(INLINE_JSON_PATH, JSON.stringify(currentData.slice(0, 15), null, 2));
     } catch (e) {
-        console.error("[RANGE] Gagal update inline.json:", e.message);
+        console.error("[RANGE] Update Inline Error:", e.message);
     }
 }
 
@@ -125,74 +112,28 @@ async function processQueue() {
                 }).catch(() => {});
             }
 
-            const buttons = [];
-            if (sessionConfig.botLink) buttons.push([{ text: "📞 Get Number", url: sessionConfig.botLink }]);
-            if (sessionConfig.urlAdmin) buttons.push([{ text: "🎭 Owner", url: sessionConfig.urlAdmin }]);
-
             const res = await axios.post(`${API_URL}/sendMessage`, {
                 chat_id: sessionConfig.chatId,
                 text: item.text,
                 parse_mode: 'HTML',
                 disable_web_page_preview: true,
-                reply_markup: { inline_keyboard: buttons }
+                reply_markup: { 
+                    inline_keyboard: [
+                        [{ text: "📞 Get Number", url: sessionConfig.botLink }],
+                        [{ text: "🎭 Owner", url: sessionConfig.urlAdmin }]
+                    ] 
+                }
             });
 
             if (res.data?.ok) {
-                SENT_MESSAGES.set(item.rangeKey, {
-                    message_id: res.data.result.message_id
-                });
+                SENT_MESSAGES.set(item.rangeKey, { message_id: res.data.result.message_id });
             }
         } catch (e) {
-            console.error(`[RANGE] Send Error:`, e.response?.data?.description || e.message);
+            console.error(`[RANGE] TG Error:`, e.response?.data?.description || e.message);
         }
         await new Promise(r => setTimeout(r, 1500));
     }
     IS_PROCESSING_QUEUE = false;
-}
-
-// ================= DATA HANDLER =================
-
-async function handleApiData(data) {
-    const logs = data?.logs || data?.data || (Array.isArray(data) ? data : []);
-    
-    for (const item of logs) {
-        const serviceRaw = (item.app_name || "").toUpperCase();
-        
-        // Filter Service
-        if (serviceRaw.includes("FACEBOOK") || serviceRaw.includes("WHATSAPP")) {
-            const range = item.number || item.range || "";
-            const sms = item.sms || "";
-            const country = item.country || "Unknown";
-            
-            if (!range.includes("XXX")) continue;
-
-            const cacheKey = `${range}_${sms.substring(0, 15)}`;
-            if (!CACHE_SET.has(cacheKey)) {
-                CACHE_SET.add(cacheKey);
-                
-                const stats = SENT_MESSAGES.get(range) || { count: 0 };
-                const newCount = stats.count + 1;
-                SENT_MESSAGES.set(range, { ...stats, count: newCount });
-
-                // Update file inline.json secara sinkron
-                updateInlineJson(range, country, item.app_name);
-
-                const emoji = getEmoji(country);
-                const rangeText = newCount > 1 ? `<code>${range}</code> <b>(x${newCount})</b>` : `<code>${range}</code>`;
-
-                const msg = `🔥 <b>Live Message New Range</b>\n\n` +
-                            `📱 Range: ${rangeText}\n` +
-                            `${emoji} Country: ${escapeHtml(country.toUpperCase())}\n` +
-                            `⚙️ Service: <b>${item.app_name}</b>\n\n` +
-                            `🗯️ <b>Message:</b>\n` +
-                            `<blockquote>${escapeHtml(sms)}</blockquote>`;
-
-                console.log(`[RANGE] Hit: ${range} - ${item.app_name}`);
-                MESSAGE_QUEUE.push({ rangeKey: range, text: msg, newCount });
-                processQueue();
-            }
-        }
-    }
 }
 
 // ================= MONITORING LOOP =================
@@ -200,39 +141,90 @@ async function handleApiData(data) {
 async function start() {
     if (monitorLoop) return; 
     loadConfigFromFile();
-    console.log("🚀 [RANGE] Module Started (API + Inline JSON 15 Max).");
+    console.log("🚀 [RANGE] Module Scraper Started (Daily Refresh 07:00 WIB).");
 
     monitorLoop = setInterval(async () => {
         if (!state.browser) return;
         loadConfigFromFile();
 
+        // LOGIKA REFRESH JAM 7 PAGI WIB
+        const now = new Date();
+        const jktTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Jakarta"}));
+        if (jktTime.getHours() === 7 && jktTime.getMinutes() === 0 && jktTime.getSeconds() < 20) {
+            if (monitorPage) {
+                console.log("[RANGE] Jam 07:00 WIB - Melakukan Auto-Refresh Halaman...");
+                await monitorPage.reload({ waitUntil: 'networkidle' }).catch(() => {});
+            }
+        }
+
         try {
             if (!monitorPage || monitorPage.isClosed()) {
                 const context = state.browser.contexts()[0] || await state.browser.newContext();
                 monitorPage = await context.newPage();
-                
-                // Interceptor API /console/info
-                monitorPage.on('response', async (res) => {
-                    if (res.url().includes('/console/info')) {
-                        try {
-                            const json = await res.json();
-                            await handleApiData(json);
-                        } catch (e) {}
-                    }
-                });
             }
 
             if (!sessionConfig.targetUrl) return;
 
-            if (!monitorPage.url().includes(sessionConfig.targetUrl)) {
-                await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'networkidle' }).catch(() => {});
+            // Paksa kembali ke URL target jika berubah
+            const currentUrl = monitorPage.url();
+            if (!currentUrl.includes(sessionConfig.targetUrl) && currentUrl !== "about:blank") {
+                console.log("[RANGE] URL berubah, memaksa kembali ke target...");
+                await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
             }
 
-            // Trigger AJAX update
-            await monitorPage.reload({ waitUntil: 'networkidle' }).catch(() => {});
-            
+            // Scrape data berdasarkan struktur div class baru
+            const cards = await monitorPage.locator('div.group.flex.flex-col').all();
+
+            for (const card of cards) {
+                try {
+                    // Ambil Service (Facebook/WhatsApp)
+                    const service = await card.locator('span.text-blue-400, span.text-green-400').first().innerText().catch(() => "");
+                    const serviceUpper = service.toUpperCase();
+
+                    // Filter Hanya FB dan WA
+                    if (serviceUpper.includes("FACEBOOK") || serviceUpper.includes("WHATSAPP")) {
+                        
+                        // Ambil Range & Country dari blok info sebelah kiri
+                        const infoBlock = await card.locator('span.text-slate-600').first().innerText().catch(() => "");
+                        // InfoBlock format: "224657799XXX • PostPaid"
+                        const range = infoBlock.split("•")[0].trim();
+                        const country = infoBlock.split("•")[1]?.trim() || "Unknown";
+                        
+                        // Ambil Pesan SMS
+                        const message = await card.locator('p.font-mono').innerText().catch(() => "");
+
+                        if (!range.includes("XXX")) continue;
+
+                        const cacheKey = `${range}_${message.substring(0, 20)}`;
+                        if (!CACHE_SET.has(cacheKey)) {
+                            CACHE_SET.add(cacheKey);
+
+                            const stats = SENT_MESSAGES.get(range) || { count: 0 };
+                            const newCount = stats.count + 1;
+                            SENT_MESSAGES.set(range, { ...stats, count: newCount });
+
+                            // Simpan ke inline.json
+                            updateInlineJson(range, country, service);
+
+                            const emoji = getEmoji(country);
+                            const rangeText = newCount > 1 ? `<code>${range}</code> <b>(x${newCount})</b>` : `<code>${range}</code>`;
+
+                            const msg = `🔥 <b>Live Message New Range</b>\n\n` +
+                                        `📱 Range: ${rangeText}\n` +
+                                        `${emoji} Country: ${escapeHtml(country.toUpperCase())}\n` +
+                                        `⚙️ Service: <b>${service}</b>\n\n` +
+                                        `🗯️ <b>Message:</b>\n` +
+                                        `<blockquote>${escapeHtml(message.replace('➜', '').trim())}</blockquote>`;
+
+                            console.log(`[RANGE] Hit: ${range} - ${service}`);
+                            MESSAGE_QUEUE.push({ rangeKey: range, text: msg });
+                            processQueue();
+                        }
+                    }
+                } catch (e) {}
+            }
         } catch (e) {}
-    }, 20000); 
+    }, 15000); // Cek setiap 15 detik (Tanpa refresh paksa halaman)
 }
 
 function stop() {
@@ -240,7 +232,6 @@ function stop() {
         clearInterval(monitorLoop);
         monitorLoop = null;
         if (monitorPage) monitorPage.close().catch(() => {});
-        console.log("🛑 [RANGE] Module Stopped.");
     }
 }
 
