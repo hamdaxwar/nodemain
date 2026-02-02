@@ -1,5 +1,19 @@
 const fs = require('fs');
+const path = require('path');
 const config = require('../config');
+
+// Path ke bot_config.json (naik satu tingkat ke root)
+const BOT_CONFIG_PATH = path.join(__dirname, '../bot_config.json');
+
+// --- Helper Baca JSON Langsung ---
+const getLiveConfig = () => {
+    try {
+        if (fs.existsSync(BOT_CONFIG_PATH)) {
+            return JSON.parse(fs.readFileSync(BOT_CONFIG_PATH, 'utf-8'));
+        }
+    } catch (e) {}
+    return {};
+};
 
 // --- Core Helper ---
 function loadJson(filename, defaultVal = []) {
@@ -44,7 +58,6 @@ function saveCache(entry) {
 
 function isInCache(number) {
     const cache = loadCache();
-    // Normalisasi sederhana untuk cek cache
     let norm = String(number).trim().replace(/[\s-]/g, "");
     if (!norm.startsWith('+') && /^\d+$/.test(norm)) norm = '+' + norm;
     
@@ -63,12 +76,21 @@ function saveInlineRanges(ranges) { saveJson(config.FILES.INLINE_RANGE, ranges);
 function loadAksesGet10() { return new Set(loadJson(config.FILES.AKSES_GET10, [])); }
 function saveAksesGet10(userId) {
     const akses = loadAksesGet10();
-    akses.add(parseInt(userId));
+    // Simpan sebagai Number di JSON agar konsisten dengan data lama
+    akses.add(Number(userId));
     saveJson(config.FILES.AKSES_GET10, Array.from(akses));
 }
+
 function hasGet10Access(userId) {
-    if (userId === config.ADMIN_ID) return true;
-    return loadAksesGet10().has(parseInt(userId));
+    const liveCfg = getLiveConfig();
+    const adminId = String(liveCfg.ADMIN_ID || config.ADMIN_ID);
+    
+    // Cek apakah dia Admin utama (dari JSON)
+    if (String(userId) === adminId) return true;
+    
+    // Cek apakah dia punya akses tambahan (dari akses_get10.json)
+    const akses = loadJson(config.FILES.AKSES_GET10, []);
+    return akses.some(id => String(id) === String(userId));
 }
 
 // Profiles
@@ -92,12 +114,10 @@ function getUserProfile(userId, firstName = "User") {
         };
         saveProfiles(profiles);
     } else {
-        // Update name if changed
         if (profiles[strId].name !== firstName) {
             profiles[strId].name = firstName;
             saveProfiles(profiles);
         }
-        // Reset daily otp if new day
         if (profiles[strId].last_active !== today) {
             profiles[strId].otp_hari_ini = 0;
             profiles[strId].last_active = today;
@@ -129,9 +149,9 @@ function addToWaitList(number, userId, username, firstName) {
     let norm = String(number).trim().replace(/[\s-]/g, "");
     if (!norm.startsWith('+') && /^\d+$/.test(norm)) norm = '+' + norm;
 
-    let identity = username ? `@${username.replace('@', '')}` : `<a href="tg://user?id=${userId}">${firstName}</a>`;
+    // Menghilangkan formatting HTML jika ada di username agar JSON bersih
+    let identity = username ? username.replace('@', '') : userId;
     
-    // Remove existing
     waitList = waitList.filter(item => item.number !== norm);
     
     waitList.push({
