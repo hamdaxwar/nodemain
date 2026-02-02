@@ -2,13 +2,16 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { state } = require('./helpers/state'); 
-const config = require('./config');
+
+// ================= KONFIGURASI MANDIRI =================
+const CONFIG_PATH = path.join(process.cwd(), 'bot_config.json');
+const INLINE_JSON_PATH = path.join(process.cwd(), 'inline.json');
+const COUNTRY_EMOJI = require('./country.json');
 
 let monitorLoop = null;
 let monitorPage = null; 
 
-const CONFIG_PATH = path.join(process.cwd(), 'bot_config.json');
-
+// Memory Sesi Internal
 let sessionConfig = {
     token: null,
     chatId: null,
@@ -17,67 +20,114 @@ let sessionConfig = {
     urlAdmin: null
 };
 
-// Helper Validasi URL
-function validateUrl(url) {
-    if (!url) return null;
-    let formatted = url.trim();
-    if (formatted.startsWith('t.me')) formatted = 'https://' + formatted;
-    else if (formatted.startsWith('https:t.me')) formatted = formatted.replace('https:', 'https://');
-    if (!formatted.startsWith('http')) return null;
-    return formatted;
-}
+// ================= UTILS =================
 
 function loadConfigFromFile() {
     try {
         if (fs.existsSync(CONFIG_PATH)) {
-            const fileData = fs.readFileSync(CONFIG_PATH, 'utf8');
-            const json = JSON.parse(fileData);
+            const json = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
             sessionConfig.token = json.BOT_TOKEN_RANGE || json.BOT_TOKEN_MESSAGE;
             sessionConfig.chatId = String(json.CHAT_ID_RANGE || "").trim();
-            sessionConfig.botLink = validateUrl(json.URL_GETNUM);
+            sessionConfig.botLink = fixUrl(json.URL_GETNUM);
             sessionConfig.targetUrl = json.URL_TARGET_RANGE;
-            sessionConfig.urlAdmin = validateUrl(json.URL_ADMIN);
+            sessionConfig.urlAdmin = fixUrl(json.URL_ADMIN);
             return true;
         }
     } catch (err) {
-        console.error("[RANGE] Gagal membaca bot_config.json:", err.message);
+        console.error("[RANGE] Error Config:", err.message);
     }
     return false;
 }
+
+function fixUrl(url) {
+    if (!url) return "https://t.me/";
+    let f = url.trim();
+    if (f.startsWith('t.me')) f = 'https://' + f;
+    if (f.startsWith('https:t.me')) f = f.replace('https:', 'https://');
+    return f;
+}
+
+function escapeHtml(text) {
+    if (!text) return "";
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function getEmoji(country) {
+    if (!country) return "🏴‍☠️";
+    return COUNTRY_EMOJI[country.trim().toUpperCase()] || "🏴‍☠️";
+}
+
+/**
+ * Menulis data ke inline.json dengan aturan:
+ * 1. Maksimal 15 range terbaru.
+ * 2. Tidak ada duplikasi (jika sama, hapus yang lama, masukkan yang baru di atas).
+ * 3. Konversi Service: Facebook -> FB, WhatsApp -> WA.
+ */
+function updateInlineJson(newRange, country, serviceRaw) {
+    try {
+        let currentData = [];
+        if (fs.existsSync(INLINE_JSON_PATH)) {
+            const fileContent = fs.readFileSync(INLINE_JSON_PATH, 'utf8');
+            try {
+                currentData = JSON.parse(fileContent || "[]");
+            } catch (e) {
+                currentData = [];
+            }
+        }
+
+        // Konversi nama service
+        let serviceShort = "Unknown";
+        const s = serviceRaw.toUpperCase();
+        if (s.includes("FACEBOOK")) serviceShort = "FB";
+        else if (s.includes("WHATSAPP")) serviceShort = "WA";
+
+        // Hapus duplikasi jika range sudah ada
+        currentData = currentData.filter(item => item.range !== newRange);
+
+        // Tambahkan data baru di urutan teratas
+        currentData.unshift({
+            range: newRange,
+            country: country.toUpperCase(),
+            emoji: getEmoji(country),
+            service: serviceShort
+        });
+
+        // Batasi maksimal 15 data
+        const limitedData = currentData.slice(0, 15);
+        
+        fs.writeFileSync(INLINE_JSON_PATH, JSON.stringify(limitedData, null, 2));
+    } catch (e) {
+        console.error("[RANGE] Gagal update inline.json:", e.message);
+    }
+}
+
+// ================= TELEGRAM LOGIC =================
 
 let SENT_MESSAGES = new Map();
 let CACHE_SET = new Set();
 let MESSAGE_QUEUE = []; 
 let IS_PROCESSING_QUEUE = false; 
 
-const escapeHTML = (str) => {
-    if (!str) return "";
-    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-};
-
 async function processQueue() {
     if (IS_PROCESSING_QUEUE || MESSAGE_QUEUE.length === 0) return;
     IS_PROCESSING_QUEUE = true;
 
     while (MESSAGE_QUEUE.length > 0) {
-        loadConfigFromFile();
         const item = MESSAGE_QUEUE.shift();
-        if (!sessionConfig.token || !sessionConfig.chatId) continue;
-
         const API_URL = `https://api.telegram.org/bot${sessionConfig.token}`;
 
         try {
-            if (SENT_MESSAGES.has(item.rangeVal)) {
-                const oldData = SENT_MESSAGES.get(item.rangeVal);
+            if (SENT_MESSAGES.has(item.rangeKey)) {
+                const old = SENT_MESSAGES.get(item.rangeKey);
                 await axios.post(`${API_URL}/deleteMessage`, {
                     chat_id: sessionConfig.chatId, 
-                    message_id: oldData.message_id
+                    message_id: old.message_id
                 }).catch(() => {});
             }
 
             const buttons = [];
             if (sessionConfig.botLink) buttons.push([{ text: "📞 Get Number", url: sessionConfig.botLink }]);
-            if (sessionConfig.urlAdmin) buttons.push([{ text: "👨‍💻 Admin", url: sessionConfig.urlAdmin }]);
+            if (sessionConfig.urlAdmin) buttons.push([{ text: "🎭 Owner", url: sessionConfig.urlAdmin }]);
 
             const res = await axios.post(`${API_URL}/sendMessage`, {
                 chat_id: sessionConfig.chatId,
@@ -87,74 +137,71 @@ async function processQueue() {
                 reply_markup: { inline_keyboard: buttons }
             });
 
-            if (res.data && res.data.ok) {
-                SENT_MESSAGES.set(item.rangeVal, {
-                    message_id: res.data.result.message_id,
-                    count: item.newCount
+            if (res.data?.ok) {
+                SENT_MESSAGES.set(item.rangeKey, {
+                    message_id: res.data.result.message_id
                 });
             }
         } catch (e) {
-            console.error(`[RANGE] Telegram Error:`, e.response?.data?.description || e.message);
+            console.error(`[RANGE] Send Error:`, e.response?.data?.description || e.message);
         }
         await new Promise(r => setTimeout(r, 1500));
     }
     IS_PROCESSING_QUEUE = false;
 }
 
-const formatLiveMessage = (rangeVal, count, countryName, service, fullMessage) => {
-    const emoji = config.COUNTRY_EMOJI?.[countryName.toUpperCase()] || "🏴‍☠️";
-    const rangeDisplay = count > 1 ? `<code>${rangeVal}</code> <b>(x${count})</b>` : `<code>${rangeVal}</code>`;
+// ================= DATA HANDLER =================
+
+async function handleApiData(data) {
+    const logs = data?.logs || data?.data || (Array.isArray(data) ? data : []);
     
-    return `🔥 <b>Live Message New Range</b>\n\n` +
-           `📱 Range: ${rangeDisplay}\n` +
-           `${emoji} Country: ${escapeHTML(countryName)}\n` +
-           `⚙️ Service: ${escapeHTML(service)}\n\n` +
-           `🗯️ <b>Message:</b>\n` +
-           `<blockquote>${escapeHTML(fullMessage)}</blockquote>`;
-};
-
-// Fungsi untuk menangani data JSON yang didapat dari API
-async function handleApiData(jsonData) {
-    if (!jsonData || !Array.isArray(jsonData)) return;
-
-    for (const item of jsonData) {
-        const appName = (item.app_name || "").toUpperCase();
+    for (const item of logs) {
+        const serviceRaw = (item.app_name || "").toUpperCase();
         
-        // Filter: Hanya Facebook atau WhatsApp
-        if (appName.includes("FACEBOOK") || appName.includes("WHATSAPP")) {
-            const range = item.number || item.range || "Unknown";
-            const country = item.country || "Unknown";
+        // Filter Service
+        if (serviceRaw.includes("FACEBOOK") || serviceRaw.includes("WHATSAPP")) {
+            const range = item.number || item.range || "";
             const sms = item.sms || "";
-            const service = item.app_name;
-
-            // Pastikan ini adalah range (mengandung XXX)
+            const country = item.country || "Unknown";
+            
             if (!range.includes("XXX")) continue;
 
-            const cacheKey = `${range}_${sms.substring(0, 20)}`;
-
+            const cacheKey = `${range}_${sms.substring(0, 15)}`;
             if (!CACHE_SET.has(cacheKey)) {
                 CACHE_SET.add(cacheKey);
-                const currentData = SENT_MESSAGES.get(range) || { count: 0 };
-                const newCount = currentData.count + 1;
+                
+                const stats = SENT_MESSAGES.get(range) || { count: 0 };
+                const newCount = stats.count + 1;
+                SENT_MESSAGES.set(range, { ...stats, count: newCount });
 
-                console.log(`[RANGE][API] New Hit: ${range} - ${service}`);
+                // Update file inline.json secara sinkron
+                updateInlineJson(range, country, item.app_name);
 
-                MESSAGE_QUEUE.push({
-                    rangeVal: range,
-                    newCount: newCount,
-                    text: formatLiveMessage(range, newCount, country, service, sms)
-                });
+                const emoji = getEmoji(country);
+                const rangeText = newCount > 1 ? `<code>${range}</code> <b>(x${newCount})</b>` : `<code>${range}</code>`;
+
+                const msg = `🔥 <b>Live Message New Range</b>\n\n` +
+                            `📱 Range: ${rangeText}\n` +
+                            `${emoji} Country: ${escapeHtml(country.toUpperCase())}\n` +
+                            `⚙️ Service: <b>${item.app_name}</b>\n\n` +
+                            `🗯️ <b>Message:</b>\n` +
+                            `<blockquote>${escapeHtml(sms)}</blockquote>`;
+
+                console.log(`[RANGE] Hit: ${range} - ${item.app_name}`);
+                MESSAGE_QUEUE.push({ rangeKey: range, text: msg, newCount });
                 processQueue();
             }
         }
     }
 }
 
+// ================= MONITORING LOOP =================
+
 async function start() {
     if (monitorLoop) return; 
     loadConfigFromFile();
-    console.log("🚀 [RANGE] Module Started (API Interceptor Mode).");
-    
+    console.log("🚀 [RANGE] Module Started (API + Inline JSON 15 Max).");
+
     monitorLoop = setInterval(async () => {
         if (!state.browser) return;
         loadConfigFromFile();
@@ -163,42 +210,29 @@ async function start() {
             if (!monitorPage || monitorPage.isClosed()) {
                 const context = state.browser.contexts()[0] || await state.browser.newContext();
                 monitorPage = await context.newPage();
-
-                // MONITOR NETWORK: Tangkap semua response API
-                monitorPage.on('response', async (response) => {
-                    const url = response.url();
-                    // Cek jika URL mengandung kata kunci API info atau console data
-                    if (url.includes('/info') || url.includes('/console') || url.includes('/get-data')) {
+                
+                // Interceptor API /console/info
+                monitorPage.on('response', async (res) => {
+                    if (res.url().includes('/console/info')) {
                         try {
-                            const contentType = response.headers()['content-type'];
-                            if (contentType && contentType.includes('application/json')) {
-                                const data = await response.json();
-                                // Jika data berbentuk objek yang punya properti data/logs, ambil dalamnya
-                                const actualData = data.data || data.logs || data;
-                                await handleApiData(actualData);
-                            }
-                        } catch (e) {
-                            // Gagal parse JSON, abaikan
-                        }
+                            const json = await res.json();
+                            await handleApiData(json);
+                        } catch (e) {}
                     }
                 });
             }
 
             if (!sessionConfig.targetUrl) return;
 
-            // Navigasi ke target jika belum
             if (!monitorPage.url().includes(sessionConfig.targetUrl)) {
                 await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'networkidle' }).catch(() => {});
-            } else {
-                // FORCE REFRESH AJAX: Klik tombol refresh di web atau reload halaman
-                // Ini memicu API 'info' dipanggil lagi
-                await monitorPage.reload({ waitUntil: 'networkidle' }).catch(() => {});
             }
 
-        } catch (e) {
-            // console.error("[RANGE] Loop Error:", e.message);
-        }
-    }, 20000); // Cek/Refresh setiap 20 detik
+            // Trigger AJAX update
+            await monitorPage.reload({ waitUntil: 'networkidle' }).catch(() => {});
+            
+        } catch (e) {}
+    }, 20000); 
 }
 
 function stop() {
@@ -210,5 +244,4 @@ function stop() {
     }
 }
 
-const syncSession = loadConfigFromFile;
-module.exports = { start, stop, syncSession };
+module.exports = { start, stop, syncSession: loadConfigFromFile };
