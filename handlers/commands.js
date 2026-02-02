@@ -1,9 +1,29 @@
+const fs = require('fs');
+const path = require('path');
 const config = require('../config');
 const db = require('../helpers/database');
 const tg = require('../helpers/telegram');
 const { state } = require('../helpers/state');
 const scraper = require('../helpers/scraper');
 const adminHandler = require('./admin');
+
+// Pastikan path ini benar mengarah ke root folder tempat bot_config.json berada
+const BOT_CONFIG_PATH = path.join(__dirname, '../../bot_config.json');
+
+/**
+ * Helper untuk membaca konfigurasi dari JSON secara langsung (Live)
+ */
+const getLiveConfig = () => {
+    try {
+        if (fs.existsSync(BOT_CONFIG_PATH)) {
+            const data = fs.readFileSync(BOT_CONFIG_PATH, 'utf-8');
+            return JSON.parse(data);
+        }
+    } catch (e) {
+        console.error("[COMMANDS] Gagal membaca bot_config.json:", e.message);
+    }
+    return {};
+};
 
 async function processCommand(msg) {
     const chatId = msg.chat.id;
@@ -13,8 +33,16 @@ async function processCommand(msg) {
     const mention = usernameTg ? `@${usernameTg}` : `<a href='tg://user?id=${userId}'>${firstName}</a>`;
     const text = msg.text || "";
 
-    // --- ADMIN COMMANDS ---
-    if (userId === config.ADMIN_ID) {
+    // Ambil Konfigurasi Terbaru
+    const liveCfg = getLiveConfig();
+    
+    // Gunakan nilai dari JSON, jika tidak ada pakai fallback dari config.js
+    const adminIdFromConfig = String(liveCfg.ADMIN_ID || config.ADMIN_ID);
+    const adminUrl = liveCfg.URL_ADMIN || "https://t.me/Imr1d";
+    const groupLink1 = liveCfg.URL_GRUP_OTP || config.GROUP_LINK_1;
+
+    // --- FITUR ADMIN ---
+    if (String(userId) === adminIdFromConfig) {
         if (text.startsWith("/add")) {
             state.waitingAdminInput.add(userId);
             const prompt = "Silahkan kirim daftar range dalam format:\n\n<code>range > country > service</code>\nAtau default service WA:\n<code>range > country</code>\n\nContoh:\n<code>23273XXX > SIERRA LEONE > WA</code>";
@@ -40,7 +68,7 @@ async function processCommand(msg) {
         }
     }
 
-    // --- GET10 ---
+    // --- PERINTAH /GET10 ---
     if (text === "/get10") {
         if (db.hasGet10Access(userId)) {
             state.get10RangeInput.add(userId);
@@ -52,7 +80,7 @@ async function processCommand(msg) {
         return;
     }
 
-    // --- STATE HANDLERS ---
+    // --- PROSES INPUT STATE (Admin/Broadcast/Dana) ---
     if (state.waitingAdminInput.has(userId)) {
         state.waitingAdminInput.delete(userId);
         const pMsgId = state.pendingMessage[userId];
@@ -87,7 +115,7 @@ async function processCommand(msg) {
         return;
     }
 
-    // --- MANUAL & GET10 INPUT PROCESS ---
+    // --- PROSES INPUT RANGE MANUAL / GET10 ---
     if (state.get10RangeInput.has(userId)) {
         state.get10RangeInput.delete(userId);
         const prefix = text.trim();
@@ -125,7 +153,7 @@ async function processCommand(msg) {
         return;
     }
 
-    // --- START ---
+    // --- MENU /START ---
     if (text === "/start") {
         if (await tg.isUserInBothGroups(userId)) {
             state.verifiedUsers.add(userId);
@@ -144,7 +172,7 @@ async function processCommand(msg) {
 
             const kb = {
                 inline_keyboard: [
-                    [{ text: "📲 Get Number", callback_data: "getnum" }, { text: "👨‍💼 Admin", url: "https://t.me/" }],
+                    [{ text: "📲 Get Number", callback_data: "getnum" }, { text: "👨‍💼 Admin", url: adminUrl }],
                     [{ text: "💸 Withdraw Money", callback_data: "withdraw_menu" }]
                 ]
             };
@@ -152,7 +180,7 @@ async function processCommand(msg) {
         } else {
             const kb = {
                 inline_keyboard: [
-                    [{ text: "📌 Gabung Grup 1", url: config.GROUP_LINK_1 }],
+                    [{ text: "📌 Gabung Grup 1", url: groupLink1 }],
                     [{ text: "📌 Gabung Grup 2", url: config.GROUP_LINK_2 }],
                     [{ text: "✅ Verifikasi Ulang", callback_data: "verify" }]
                 ]
