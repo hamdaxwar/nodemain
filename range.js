@@ -5,6 +5,7 @@ const { state } = require('./helpers/state');
 const config = require('./config');
 
 let monitorLoop = null;
+let monitorPage = null; 
 let SENT_MESSAGES = new Map();
 let CACHE_SET = new Set();
 let MESSAGE_QUEUE = []; 
@@ -13,7 +14,9 @@ let IS_PROCESSING_QUEUE = false;
 const INLINE_JSON_PATH = path.join(process.cwd(), 'inline.json');
 const BOT_CONFIG_PATH = path.join(process.cwd(), 'bot_config.json');
 
-// --- Helper Baca JSON Langsung ---
+/**
+ * Helper Baca JSON Dinamis
+ */
 const getLiveConfig = () => {
     try {
         if (fs.existsSync(BOT_CONFIG_PATH)) {
@@ -40,32 +43,40 @@ const cleanServiceName = (service) => {
     return service.trim();
 };
 
+/**
+ * Pengiriman Pesan Menggunakan Token Khusus Range
+ */
 async function processQueue() {
     if (IS_PROCESSING_QUEUE || MESSAGE_QUEUE.length === 0) return;
     IS_PROCESSING_QUEUE = true;
 
+    // AMBIL DATA DINAMIS DARI JSON
     const liveCfg = getLiveConfig();
-    const chatIdRange = liveCfg.CHAT_ID_RANGE || config.CHAT_ID_RANGE;
-    const botLink = liveCfg.URL_GETNUM || config.BOT_USERNAME_LINK;
+    const tokenRange = liveCfg.BOT_TOKEN_RANGE || state.BOT_TOKEN; // Fallback ke bot utama jika kosong
+    const chatIdRange = liveCfg.CHAT_ID_RANGE || "-1003358198353";
+    const botLink = liveCfg.URL_GETNUM || "https://t.me/myzuraisgoodbot";
+    
+    const API_URL_RANGE = `https://api.telegram.org/bot${tokenRange}`;
 
     while (MESSAGE_QUEUE.length > 0) {
         const item = MESSAGE_QUEUE.shift();
         try {
+            // Hapus pesan lama jika range yang sama muncul lagi
             if (SENT_MESSAGES.has(item.rangeVal)) {
                 const oldMid = SENT_MESSAGES.get(item.rangeVal).message_id;
-                await axios.post(`${state.API_URL}/deleteMessage`, {
+                await axios.post(`${API_URL_RANGE}/deleteMessage`, {
                     chat_id: chatIdRange, 
                     message_id: oldMid
                 }).catch(() => {});
                 await new Promise(r => setTimeout(r, 500));
             }
 
-            const res = await axios.post(`${state.API_URL}/sendMessage`, {
+            const res = await axios.post(`${API_URL_RANGE}/sendMessage`, {
                 chat_id: chatIdRange,
                 text: item.text,
                 parse_mode: 'HTML',
                 reply_markup: { 
-                    inline_keyboard: [[{ text: "📞GetNumber", url: botLink }]] 
+                    inline_keyboard: [[{ text: "📞 Get Number", url: botLink }]] 
                 }
             });
 
@@ -76,7 +87,7 @@ async function processQueue() {
                     timestamp: Date.now()
                 });
                 saveToInlineJson(item.rangeVal, item.country, item.service);
-                console.log(`✅ [RANGE] Terkirim: ${item.rangeVal}`);
+                console.log(`✅ [RANGE] Bot Terpisah Terkirim: ${item.rangeVal}`);
             }
         } catch (e) {
             if (e.response && e.response.status === 429) {
@@ -127,27 +138,34 @@ const formatLiveMessage = (rangeVal, count, countryName, service, fullMessage) =
 
 async function start() {
     if (monitorLoop) return; 
-    console.log("🚀 [RANGE] Module Initializing...");
+    console.log("🚀 [RANGE] Module Started (Independent Tab).");
     
     monitorLoop = setInterval(async () => {
         if (!state.isBotRunning || !state.browser) return;
 
-        // Gunakan Shared Page dari state agar tidak double login
-        const page = state.sharedPage;
-        if (!page) return;
-
         const liveCfg = getLiveConfig();
+        // 1. URL TARGET RANGE DINAMIS
         const targetUrl = liveCfg.URL_TARGET_RANGE || "https://x.mnitnetwork.com/mdashboard/console";
 
         try {
-            // Cek apakah kita di halaman yang benar tanpa mengganggu proses lain
-            if (!page.url().includes("/console")) {
-                console.log(`[RANGE] Mengarahkan ke Console: ${targetUrl}`);
-                await page.goto(targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+            if (!monitorPage || monitorPage.isClosed()) {
+                const contexts = state.browser.contexts();
+                const context = contexts.length > 0 ? contexts[0] : await state.browser.newContext();
+                monitorPage = await context.newPage();
+            }
+
+            if (!monitorPage.url().includes("/console")) {
+                console.log(`[RANGE] Navigasi ke Console: ${targetUrl}`);
+                await monitorPage.goto(targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
             }
 
             const CONSOLE_SELECTOR = ".group.flex.flex-col.sm\\:flex-row.sm\\:items-start.gap-3.p-3.rounded-lg";
-            const elements = await page.locator(CONSOLE_SELECTOR).all();
+            
+            try {
+                await monitorPage.waitForSelector(CONSOLE_SELECTOR, { timeout: 5000 });
+            } catch(e) { return; }
+
+            const elements = await monitorPage.locator(CONSOLE_SELECTOR).all();
 
             for (const el of elements) {
                 try {
@@ -185,23 +203,26 @@ async function start() {
                 } catch (e) { continue; }
             }
 
-            // Cleanup Cache setiap jam
-            if (CACHE_SET.size > 500) CACHE_SET.clear();
+            // Maintenance Map
             const now = Date.now();
             for (let [range, val] of SENT_MESSAGES.entries()) {
-                if (now - val.timestamp > 3600000) SENT_MESSAGES.delete(range);
+                if (now - val.timestamp > 600000) SENT_MESSAGES.delete(range);
             }
 
         } catch (e) { 
-            // Jangan log error navigasi biasa agar tidak spam
+            console.error(`❌ [RANGE] Loop Error: ${e.message}`);
         }
-    }, 15000); // Scan setiap 15 detik agar tidak membebani browser
+    }, 12000); 
 }
 
 function stop() {
     if (monitorLoop) {
         clearInterval(monitorLoop);
         monitorLoop = null;
+        if (monitorPage) {
+            monitorPage.close().catch(() => {});
+            monitorPage = null;
+        }
         console.log("🛑 [RANGE] Module Stopped.");
     }
 }
