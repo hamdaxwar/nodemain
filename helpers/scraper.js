@@ -1,9 +1,26 @@
 const { chromium } = require('playwright');
+const fs = require('fs');
+const path = require('path');
 const config = require('../config');
 const { performLogin } = require('../login.js'); 
 const { state, playwrightLock } = require('./state');
 const db = require('./database');
 const tg = require('./telegram');
+
+// Path ke bot_config.json
+const BOT_CONFIG_PATH = path.join(__dirname, '../bot_config.json');
+
+/**
+ * Helper untuk membaca konfigurasi dari JSON secara langsung (Live)
+ */
+const getLiveConfig = () => {
+    try {
+        if (fs.existsSync(BOT_CONFIG_PATH)) {
+            return JSON.parse(fs.readFileSync(BOT_CONFIG_PATH, 'utf-8'));
+        }
+    } catch (e) {}
+    return {};
+};
 
 function normalizeNumber(number) {
     let norm = String(number).trim().replace(/[\s-]/g, "");
@@ -25,9 +42,15 @@ async function initBrowser() {
         try { await state.browser.close(); } catch(e){}
     }
     
-    // Cek Config
-    if (!config.STEX_EMAIL || !config.STEX_PASSWORD) {
-        console.error("[BROWSER] Email/Pass not configured.");
+    // Ambil Config Terbaru dari JSON
+    const liveCfg = getLiveConfig();
+    const email = liveCfg.STEX_EMAIL || config.STEX_EMAIL;
+    const pass = liveCfg.STEX_PASSWORD || config.STEX_PASSWORD;
+    const loginUrl = liveCfg.URL_LOGIN || config.LOGIN_URL;
+    const targetUrl = liveCfg.URL_TARGET || config.TARGET_URL;
+
+    if (!email || !pass) {
+        console.error("[BROWSER] Email/Pass tidak ditemukan di JSON maupun config.");
         return;
     }
 
@@ -41,11 +64,12 @@ async function initBrowser() {
     state.sharedPage = await context.newPage();
 
     try {
-        await performLogin(state.sharedPage, config.STEX_EMAIL, config.STEX_PASSWORD, config.LOGIN_URL);
-        console.log("[BROWSER] Login Success. Redirecting...");
-        await state.sharedPage.goto(config.TARGET_URL, { waitUntil: 'domcontentloaded' });
+        console.log(`[BROWSER] Mencoba login ke: ${loginUrl}`);
+        await performLogin(state.sharedPage, email, pass, loginUrl);
+        console.log("[BROWSER] Login Berhasil. Menuju Target URL...");
+        await state.sharedPage.goto(targetUrl, { waitUntil: 'domcontentloaded' });
     } catch (e) {
-        console.error(`[BROWSER ERROR] Login Failed: ${e.message}`);
+        console.error(`[BROWSER ERROR] Gagal: ${e.message}`);
     }
 }
 
@@ -124,6 +148,9 @@ async function processUserInput(userId, prefix, clickCount, usernameTg, firstNam
 
         const page = state.sharedPage;
         const INPUT_SELECTOR = "input[name='numberrange']";
+        const liveCfg = getLiveConfig();
+        const otpGroupLink = liveCfg.URL_GRUP_OTP || config.GROUP_LINK_1;
+
         try {
             await page.waitForSelector(INPUT_SELECTOR, { state: 'visible', timeout: 10000 });
             await page.fill(INPUT_SELECTOR, "");
@@ -208,7 +235,7 @@ async function processUserInput(userId, prefix, clickCount, usernameTg, firstNam
                 inline_keyboard: [
                     [{ text: "🔄 Change 1 Number", callback_data: `change_num:1:${prefix}` }],
                     [{ text: "🔄 Change 3 Number", callback_data: `change_num:3:${prefix}` }],
-                    [{ text: "🔐 OTP Grup", url: config.GROUP_LINK_1 }, { text: "🌐 Change Range", callback_data: "getnum" }]
+                    [{ text: "🔐 OTP Grup", url: otpGroupLink }, { text: "🌐 Change Range", callback_data: "getnum" }]
                 ]
             };
             await tg.tgEdit(userId, msgId, msg, inlineKb);
@@ -223,4 +250,3 @@ async function processUserInput(userId, prefix, clickCount, usernameTg, firstNam
 }
 
 module.exports = { initBrowser, processUserInput, getProgressMessage };
-
