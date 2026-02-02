@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-// Gunakan path.join(process.cwd()) agar selalu merujuk ke root folder aplikasi
+// Lokasi bot_config.json di root folder
 const CONFIG_FILE = path.join(process.cwd(), 'bot_config.json');
 
 function loadRawConfig() {
@@ -42,6 +42,7 @@ const state = {
     isBotRunning: false,
     statusText: "Idle",
     browser: null,
+    sharedPage: null, // Tambahkan ini jika scraper membutuhkannya
     
     // Properti dari JSON
     BOT_TOKEN: "",
@@ -57,7 +58,7 @@ const state = {
     GROUP_LINK_1: "",
 
     /**
-     * Memperbarui data dari file JSON tanpa merusak variabel Set di atas
+     * Memperbarui data dari file JSON
      */
     reload: function() {
         const conf = loadRawConfig();
@@ -88,10 +89,16 @@ const state = {
         SMC: "smc.json"
     },
     
+    // LOCK SYSTEM UNTUK PLAYWRIGHT (Lengkap dengan isLocked)
     playwrightLock: {
         locked: false,
+        isLocked: function() {
+            return this.locked;
+        },
         acquire: async function() {
-            while (this.locked) await new Promise(r => setTimeout(r, 100));
+            while (this.locked) {
+                await new Promise(r => setTimeout(r, 100));
+            }
             this.locked = true;
             return () => { this.locked = false; };
         }
@@ -101,4 +108,7 @@ const state = {
 // Panggil reload pertama kali
 state.reload();
 
-module.exports = { state, playwrightLock: state.playwrightLock };
+module.exports = { 
+    state: state, 
+    playwrightLock: state.playwrightLock 
+};
