@@ -7,22 +7,31 @@ const config = require('./config');
 let monitorLoop = null;
 let monitorPage = null;
 
-const SMC_JSON_FILE = path.join(__dirname, "smc.json");
-const WAIT_JSON_FILE = path.join(__dirname, "wait.json");
-const CACHE_FILE = path.join(__dirname, 'otp_cache.json');
-const BOT_CONFIG_PATH = path.join(__dirname, 'bot_config.json');
-
-// --- Helper Baca JSON Langsung ---
-const getLiveConfig = () => {
-    try {
-        if (fs.existsSync(BOT_CONFIG_PATH)) {
-            return JSON.parse(fs.readFileSync(BOT_CONFIG_PATH, 'utf-8'));
-        }
-    } catch (e) {
-        console.error("❌ [MESSAGE] Gagal baca bot_config.json");
-    }
-    return {};
+// Sesi Memory (Hanya cari lagi jika sesi restart/reload)
+let sessionConfig = {
+    token: null,
+    chatId: null,
+    adminUrl: null,
+    botLink: null,
+    targetUrl: null
 };
+
+/**
+ * Sinkronisasi Sesi dari State (JSON)
+ */
+function syncSession() {
+    // state.reload() sudah dipanggil di main/state, kita tinggal ambil nilainya
+    sessionConfig.token = state.BOT_TOKEN_MESSAGE || state.BOT_TOKEN;
+    sessionConfig.chatId = state.CHAT_ID_MESSAGE;
+    sessionConfig.adminUrl = state.URL_ADMIN;
+    sessionConfig.botLink = state.URL_GETNUM;
+    sessionConfig.targetUrl = state.URL_TARGET_MESSAGE;
+    console.log("[MESSAGE] Sesi Config Sinkron.");
+}
+
+const SMC_JSON_FILE = path.join(process.cwd(), "smc.json");
+const WAIT_JSON_FILE = path.join(process.cwd(), "wait.json");
+const CACHE_FILE = path.join(process.cwd(), 'otp_cache.json');
 
 // --- Utils ---
 function escapeHtml(text) {
@@ -68,14 +77,11 @@ function extractOtp(text) {
 }
 
 async function sendTelegram(text, otpCode = null) {
-    // Ambil data terbaru dari JSON untuk pengiriman
-    const liveCfg = getLiveConfig();
-    const chatIdMessage = liveCfg.CHAT_ID_MESSAGE || config.CHAT_ID_MESSAGE;
-    const adminLink = liveCfg.URL_ADMIN || config.TELEGRAM_ADMIN_LINK;
-    const botLink = liveCfg.URL_GETNUM || config.BOT_USERNAME_LINK;
+    // Gunakan nilai dari ingatan sesi
+    const API_URL_MESSAGE = `https://api.telegram.org/bot${sessionConfig.token}`;
 
     const payload = {
-        chat_id: chatIdMessage,
+        chat_id: sessionConfig.chatId,
         text: text,
         parse_mode: 'HTML',
         disable_web_page_preview: true
@@ -85,114 +91,82 @@ async function sendTelegram(text, otpCode = null) {
         payload.reply_markup = {
             inline_keyboard: [
                 [
-                    { text: ` ${otpCode}`, copy_text: { text: otpCode } }, 
-                    { text: "🎭 Owner", url: adminLink }
+                    { text: `📋 Copy OTP: ${otpCode}`, callback_data: `copy_${otpCode}` }, 
+                    { text: "🎭 Owner", url: sessionConfig.adminUrl }
                 ],
-                [{ text: "📞 Get Number", url: botLink }]
+                [{ text: "📞 Get Number", url: sessionConfig.botLink }]
             ]
         };
     }
 
     try {
-        await axios.post(`${config.API_URL}/sendMessage`, payload);
-    } catch (e) {}
+        await axios.post(`${API_URL_MESSAGE}/sendMessage`, payload);
+    } catch (e) {
+        console.error("❌ [MESSAGE] Kirim Gagal:", e.message);
+    }
 }
 
-// --- Module Controls ---
 async function start() {
     if (monitorLoop) return;
+    
+    // Inisialisasi Ingatan Sesi saat Start
+    syncSession();
     console.log("🚀 [MESSAGE] Module Started.");
 
-    const checkState = setInterval(() => {
-        if (!state.isBotRunning) { clearInterval(checkState); return; }
-        if (state.browser) {
-            clearInterval(checkState);
-            runLoop();
-        }
-    }, 2000);
+    monitorLoop = setInterval(async () => {
+        if (!state.isBotRunning || !state.browser) return;
 
-    async function runLoop() {
-        monitorLoop = setInterval(async () => {
-            if (!state.isBotRunning) {
-                stop();
-                return;
+        try {
+            if (!monitorPage || monitorPage.isClosed()) {
+                const contexts = state.browser.contexts();
+                const context = contexts.length > 0 ? contexts[0] : await state.browser.newContext();
+                monitorPage = await context.newPage();
             }
 
-            // AMBIL URL TARGET MESSAGE DARI JSON SETIAP LOOP
-            const liveCfg = getLiveConfig();
-            const targetMessageUrl = liveCfg.URL_TARGET_MESSAGE || "https://stexsms.com/mdashboard/getnum";
+            // Gunakan URL dari ingatan sesi
+            if (!monitorPage.url().includes(sessionConfig.targetUrl)) {
+                await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+            }
 
-            try {
-                if (!monitorPage || monitorPage.isClosed()) {
-                    const contexts = state.browser.contexts();
-                    const context = contexts.length > 0 ? contexts[0] : await state.browser.newContext();
-                    monitorPage = await context.newPage();
-                }
+            const responsePromise = monitorPage.waitForResponse(r => r.url().includes("/getnum/info"), { timeout: 5000 }).catch(() => null);
+            await monitorPage.click('th:has-text("Number Info")', { timeout: 1000 }).catch(() => {});
+            
+            const response = await responsePromise;
+            if (response) {
+                const json = await response.json();
+                const numbers = json?.data?.numbers || [];
 
-                if (!monitorPage.url().includes(targetMessageUrl)) {
-                    await monitorPage.goto(targetMessageUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
-                }
+                for (const item of numbers) {
+                    if (item.status === 'success' && item.message) {
+                        const otp = extractOtp(item.message);
+                        const phone = "+" + item.number;
+                        const key = `${otp}_${phone}`;
+                        const cache = getCache();
 
-                const responsePromise = monitorPage.waitForResponse(r => r.url().includes("/getnum/info"), { timeout: 5000 }).catch(() => null);
-                
-                // Trigger refresh dengan klik header tabel
-                await monitorPage.click('th:has-text("Number Info")', { timeout: 1000 }).catch(() => {});
-                
-                const response = await responsePromise;
-                if (response) {
-                    const json = await response.json();
-                    const numbers = json?.data?.numbers || [];
+                        if (otp && !cache[key]) {
+                            cache[key] = { t: new Date().toISOString() };
+                            saveToCache(cache);
 
-                    for (const item of numbers) {
-                        if (item.status === 'success' && item.message) {
-                            const otp = extractOtp(item.message);
-                            const phone = "+" + item.number;
-                            const key = `${otp}_${phone}`;
-                            const cache = getCache();
-
-                            if (otp && !cache[key]) {
-                                cache[key] = { t: new Date().toISOString() };
-                                saveToCache(cache);
-
-                                const entry = {
-                                    service: item.full_number || "Service",
-                                    number: phone,
-                                    otp: otp,
-                                    full_message: item.message,
-                                    timestamp: new Date().toLocaleString()
-                                };
-                                
-                                let existing = [];
-                                if (fs.existsSync(SMC_JSON_FILE)) {
-                                    try { existing = JSON.parse(fs.readFileSync(SMC_JSON_FILE)); } catch(e){}
-                                }
-                                existing.push(entry);
-                                fs.writeFileSync(SMC_JSON_FILE, JSON.stringify(existing.slice(-100), null, 2));
-
-                                const user = getUserData(phone);
-                                const userTag = user.username !== "unknown" ? `@${user.username}` : "unknown";
-                                const emoji = config.COUNTRY_EMOJI[item.country?.trim().toUpperCase()] || "🏴‍☠️";
-                                const safeFullMessage = escapeHtml(item.message);
-                                
-                                const msg = `💭 <b>New Message Received</b>\n\n` +
-                                            `<b>👤 User:</b> ${userTag}\n` +
-                                            `<b>📱 Number:</b> <code>${phone}</code>\n` +
-                                            `<b>🌍 Country:</b> <b>${item.country || "N/A"} ${emoji}</b>\n` +
-                                            `<b>✅ Service:</b> <b>${item.full_number || "N/A"}</b>\n\n` +
-                                            `🔐 OTP: <code>${otp}</code>\n\n` +
-                                            `<b>FULL MESSAGE:</b>\n` +
-                                            `<blockquote>${safeFullMessage}</blockquote>`;
-                                
-                                await sendTelegram(msg, otp);
-                            }
+                            const user = getUserData(phone);
+                            const userTag = user.username !== "unknown" ? `@${user.username}` : `ID: ${user.user_id}`;
+                            const emoji = config.COUNTRY_EMOJI[item.country?.trim().toUpperCase()] || "🏴‍☠️";
+                            
+                            const msg = `💭 <b>New Message Received</b>\n\n` +
+                                        `<b>👤 User:</b> ${userTag}\n` +
+                                        `<b>📱 Number:</b> <code>${phone}</code>\n` +
+                                        `<b>🌍 Country:</b> <b>${item.country} ${emoji}</b>\n` +
+                                        `<b>✅ Service:</b> <b>${item.full_number}</b>\n\n` +
+                                        `🔐 OTP: <code>${otp}</code>\n\n` +
+                                        `<b>FULL MESSAGE:</b>\n` +
+                                        `<blockquote>${escapeHtml(item.message)}</blockquote>`;
+                            
+                            await sendTelegram(msg, otp);
                         }
                     }
                 }
-            } catch (e) {
-                console.error("❌ [MESSAGE] Loop Error:", e.message);
             }
-        }, 10000); // 10s interval
-    }
+        } catch (e) { }
+    }, 10000); 
 }
 
 function stop() {
@@ -200,9 +174,8 @@ function stop() {
         clearInterval(monitorLoop);
         monitorLoop = null;
         if (monitorPage) monitorPage.close().catch(()=>{});
-        monitorPage = null;
         console.log("🛑 [MESSAGE] Module Stopped.");
     }
 }
 
-module.exports = { start, stop };
+module.exports = { start, stop, syncSession };
