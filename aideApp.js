@@ -3,13 +3,13 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const ngrok = require('ngrok'); // Import ngrok
+const ngrok = require('ngrok'); 
 const config = require('./config');
 const db = require('./helpers/database');
 const { state } = require('./helpers/state');
 
 const app = express();
-const PORT = 3000; // Kembali ke 3000 tidak apa-apa karena ngrok yang akan urus
+const PORT = 3000; 
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -17,8 +17,9 @@ app.use(bodyParser.json());
 const API_FILE = path.join(__dirname, 'api.json');
 const CONFIG_FILE = path.join(__dirname, 'bot_config.json');
 
+// Middleware
 app.use((req, res, next) => {
-    if (req.path === '/') return res.send("<h1>Zura Bot API Server Running via Ngrok</h1>");
+    if (req.path === '/') return res.send("<h1>Zura Bot Server Online via Ngrok</h1>");
     const clientKey = req.headers['authorization'] || req.body.api_key;
     let serverKey = "";
     if (fs.existsSync(API_FILE)) {
@@ -30,7 +31,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// ... (Endpoints post check-api, save-config, dashboard, action tetap sama seperti sebelumnya) ...
+// Endpoints (check-api, save-config, dashboard, action)
 app.post('/check-api', (req, res) => res.json({ status: true, message: "Connected" }));
 
 app.post('/save-config', (req, res) => {
@@ -72,20 +73,21 @@ app.post('/action', async (req, res) => {
 
 async function startServer() {
     app.listen(PORT, async () => {
-        console.log(`[API] Local Server listening on port ${PORT}`);
-        
+        console.log(`[API] Local Server running on port ${PORT}`);
         try {
-            // Menyalakan tunnel ngrok
-            // Jika kamu punya authtoken ngrok, masukkan: await ngrok.authtoken('TOKEN_MU');
-            const url = await ngrok.connect(PORT);
+            // Membuka tunnel ke internet
+            const url = await ngrok.connect({
+                addr: PORT,
+                proto: 'http'
+            });
             
+            console.log("\n========================================");
+            console.log("🚀 NGROK TUNNEL BERHASIL AKTIF!");
+            console.log(`🔗 URL HP: ${url}`);
             console.log("========================================");
-            console.log("🚀 SERVER DASHBOARD ONLINE (NGROK)");
-            console.log(`🔗 URL: ${url}`);
-            console.log("========================================");
-            console.log("Salin URL di atas ke Aplikasi Android kamu.");
+            console.log("Salin URL https di atas ke aplikasi HP kamu.\n");
         } catch (err) {
-            console.error("[NGROK ERROR] Gagal menyalakan tunnel:", err.message);
+            console.error("[NGROK ERROR]", err.message);
         }
     });
 }
