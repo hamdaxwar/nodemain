@@ -7,10 +7,8 @@ const config = require('./config');
 let monitorLoop = null;
 let monitorPage = null; 
 
-// Path ke file konfigurasi utama
 const CONFIG_PATH = path.join(process.cwd(), 'bot_config.json');
 
-// Memory Sesi Internal
 let sessionConfig = {
     token: null,
     chatId: null,
@@ -19,21 +17,26 @@ let sessionConfig = {
     urlAdmin: null
 };
 
-/**
- * Mengambil data langsung dari file bot_config.json secara mandiri
- */
+// Helper Validasi URL
+function validateUrl(url) {
+    if (!url) return null;
+    let formatted = url.trim();
+    if (formatted.startsWith('t.me')) formatted = 'https://' + formatted;
+    else if (formatted.startsWith('https:t.me')) formatted = formatted.replace('https:', 'https://');
+    if (!formatted.startsWith('http')) return null;
+    return formatted;
+}
+
 function loadConfigFromFile() {
     try {
         if (fs.existsSync(CONFIG_PATH)) {
             const fileData = fs.readFileSync(CONFIG_PATH, 'utf8');
             const json = JSON.parse(fileData);
-            
             sessionConfig.token = json.BOT_TOKEN_RANGE || json.BOT_TOKEN_MESSAGE;
             sessionConfig.chatId = String(json.CHAT_ID_RANGE || "").trim();
-            sessionConfig.botLink = json.URL_GETNUM;
+            sessionConfig.botLink = validateUrl(json.URL_GETNUM);
             sessionConfig.targetUrl = json.URL_TARGET_RANGE;
-            sessionConfig.urlAdmin = json.URL_ADMIN;
-
+            sessionConfig.urlAdmin = validateUrl(json.URL_ADMIN);
             return true;
         }
     } catch (err) {
@@ -57,19 +60,13 @@ async function processQueue() {
     IS_PROCESSING_QUEUE = true;
 
     while (MESSAGE_QUEUE.length > 0) {
-        // Refresh config dari file sebelum mengirim pesan
         loadConfigFromFile();
-        
         const item = MESSAGE_QUEUE.shift();
-        if (!sessionConfig.token || !sessionConfig.chatId) {
-            console.error("[RANGE] Skip: Token atau Chat ID tidak ditemukan di config.");
-            continue;
-        }
+        if (!sessionConfig.token || !sessionConfig.chatId) continue;
 
         const API_URL = `https://api.telegram.org/bot${sessionConfig.token}`;
 
         try {
-            // Hapus pesan lama untuk range yang sama (Keep chat clean)
             if (SENT_MESSAGES.has(item.rangeVal)) {
                 const oldData = SENT_MESSAGES.get(item.rangeVal);
                 await axios.post(`${API_URL}/deleteMessage`, {
@@ -78,17 +75,16 @@ async function processQueue() {
                 }).catch(() => {});
             }
 
+            const buttons = [];
+            if (sessionConfig.botLink) buttons.push([{ text: "📞 Get Number", url: sessionConfig.botLink }]);
+            if (sessionConfig.urlAdmin) buttons.push([{ text: "👨‍💻 Admin", url: sessionConfig.urlAdmin }]);
+
             const res = await axios.post(`${API_URL}/sendMessage`, {
                 chat_id: sessionConfig.chatId,
                 text: item.text,
                 parse_mode: 'HTML',
                 disable_web_page_preview: true,
-                reply_markup: { 
-                    inline_keyboard: [
-                        [{ text: "📞 Get Number", url: sessionConfig.botLink || "https://t.me/" }],
-                        [{ text: "👨‍💻 Admin", url: sessionConfig.urlAdmin || "https://t.me/" }]
-                    ] 
-                }
+                reply_markup: { inline_keyboard: buttons }
             });
 
             if (res.data && res.data.ok) {
@@ -100,7 +96,7 @@ async function processQueue() {
         } catch (e) {
             console.error(`[RANGE] Telegram Error:`, e.response?.data?.description || e.message);
         }
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 1500));
     }
     IS_PROCESSING_QUEUE = false;
 }
@@ -117,75 +113,92 @@ const formatLiveMessage = (rangeVal, count, countryName, service, fullMessage) =
            `<blockquote>${escapeHTML(fullMessage)}</blockquote>`;
 };
 
+// Fungsi untuk menangani data JSON yang didapat dari API
+async function handleApiData(jsonData) {
+    if (!jsonData || !Array.isArray(jsonData)) return;
+
+    for (const item of jsonData) {
+        const appName = (item.app_name || "").toUpperCase();
+        
+        // Filter: Hanya Facebook atau WhatsApp
+        if (appName.includes("FACEBOOK") || appName.includes("WHATSAPP")) {
+            const range = item.number || item.range || "Unknown";
+            const country = item.country || "Unknown";
+            const sms = item.sms || "";
+            const service = item.app_name;
+
+            // Pastikan ini adalah range (mengandung XXX)
+            if (!range.includes("XXX")) continue;
+
+            const cacheKey = `${range}_${sms.substring(0, 20)}`;
+
+            if (!CACHE_SET.has(cacheKey)) {
+                CACHE_SET.add(cacheKey);
+                const currentData = SENT_MESSAGES.get(range) || { count: 0 };
+                const newCount = currentData.count + 1;
+
+                console.log(`[RANGE][API] New Hit: ${range} - ${service}`);
+
+                MESSAGE_QUEUE.push({
+                    rangeVal: range,
+                    newCount: newCount,
+                    text: formatLiveMessage(range, newCount, country, service, sms)
+                });
+                processQueue();
+            }
+        }
+    }
+}
+
 async function start() {
     if (monitorLoop) return; 
-    
-    // Load config saat pertama kali jalan
-    if (!loadConfigFromFile()) {
-        console.log("[RANGE] Menunggu file bot_config.json tersedia...");
-    }
-    
-    console.log("🚀 [RANGE] Module Started (Independent Mode).");
+    loadConfigFromFile();
+    console.log("🚀 [RANGE] Module Started (API Interceptor Mode).");
     
     monitorLoop = setInterval(async () => {
-        // Cek apakah browser utama di state sudah siap
         if (!state.browser) return;
-
-        // Selalu sinkronkan config setiap interval agar up-to-date
         loadConfigFromFile();
 
         try {
             if (!monitorPage || monitorPage.isClosed()) {
                 const context = state.browser.contexts()[0] || await state.browser.newContext();
                 monitorPage = await context.newPage();
+
+                // MONITOR NETWORK: Tangkap semua response API
+                monitorPage.on('response', async (response) => {
+                    const url = response.url();
+                    // Cek jika URL mengandung kata kunci API info atau console data
+                    if (url.includes('/info') || url.includes('/console') || url.includes('/get-data')) {
+                        try {
+                            const contentType = response.headers()['content-type'];
+                            if (contentType && contentType.includes('application/json')) {
+                                const data = await response.json();
+                                // Jika data berbentuk objek yang punya properti data/logs, ambil dalamnya
+                                const actualData = data.data || data.logs || data;
+                                await handleApiData(actualData);
+                            }
+                        } catch (e) {
+                            // Gagal parse JSON, abaikan
+                        }
+                    }
+                });
             }
 
             if (!sessionConfig.targetUrl) return;
 
+            // Navigasi ke target jika belum
             if (!monitorPage.url().includes(sessionConfig.targetUrl)) {
-                await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+                await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'networkidle' }).catch(() => {});
+            } else {
+                // FORCE REFRESH AJAX: Klik tombol refresh di web atau reload halaman
+                // Ini memicu API 'info' dipanggil lagi
+                await monitorPage.reload({ waitUntil: 'networkidle' }).catch(() => {});
             }
 
-            // Seleksi elemen card di dashboard console
-            const elements = await monitorPage.locator("div.p-3.rounded-lg").all();
-
-            for (const el of elements) {
-                try {
-                    const rawText = await el.innerText();
-                    if (!rawText.includes("•")) continue;
-
-                    const lines = rawText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-                    
-                    const country = rawText.includes("•") ? rawText.split("•")[1].split("\n")[0].trim() : "Unknown";
-                    const service = lines[0] || "Unknown";
-                    const phoneRaw = lines.find(l => l.includes("XXX")) || "";
-                    const msgRaw = await el.locator("p").innerText().catch(() => "");
-
-                    const phone = phoneRaw.replace(/[^0-9X]/g, '');
-                    if (!phone.includes('XXX')) continue;
-
-                    const cacheKey = `${phone}_${msgRaw.substring(0, 20)}`;
-
-                    if (!CACHE_SET.has(cacheKey)) {
-                        CACHE_SET.add(cacheKey);
-                        const currentData = SENT_MESSAGES.get(phone) || { count: 0 };
-                        const newCount = currentData.count + 1;
-                        
-                        console.log(`[RANGE] New Hit: ${phone} (${country})`);
-
-                        MESSAGE_QUEUE.push({
-                            rangeVal: phone,
-                            newCount: newCount,
-                            text: formatLiveMessage(phone, newCount, country, service, msgRaw)
-                        });
-                        processQueue();
-                    }
-                } catch (e) {}
-            }
         } catch (e) {
             // console.error("[RANGE] Loop Error:", e.message);
         }
-    }, 12000);
+    }, 20000); // Cek/Refresh setiap 20 detik
 }
 
 function stop() {
@@ -197,7 +210,5 @@ function stop() {
     }
 }
 
-// syncSession sekarang hanya alias untuk loadConfigFromFile agar kompatibel dengan script luar
 const syncSession = loadConfigFromFile;
-
 module.exports = { start, stop, syncSession };
