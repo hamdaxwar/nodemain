@@ -6,7 +6,7 @@
  * @param {string} password 
  * @param {string} loginUrl 
  */
-const config = require('../config');
+const config = require('./config');
 
 async function performLogin(page, email, password, loginUrl) {
     // Ambil URL Target dari config (yang berasal dari URL_TARGET_GETNUM di JSON)
