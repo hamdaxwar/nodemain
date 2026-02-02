@@ -1,5 +1,5 @@
 /**
- * ZURA BOT PANEL - MAIN ENTRY POINT (FIXED)
+ * ZURA BOT PANEL - MAIN ENTRY POINT (FINAL OPTIMIZED)
  */
 
 const { fork } = require('child_process');
@@ -14,9 +14,7 @@ const stateModule = require('./helpers/state');
 const state = stateModule.state;
 const playwrightLock = stateModule.playwrightLock;
 
-// Reload state agar mengambil data terbaru dari bot_config.json
-state.reload(); 
-
+// Ambil perintah dan callback handler
 const commands = require('./handlers/commands');
 const callbacks = require('./handlers/callbacks');
 
@@ -29,22 +27,24 @@ const aideApp = require('./aideApp.js');
 let telegramLoopInterval = null;
 let expiryInterval = null;
 
-// --- Fungsi Kontrol Bot ---
-
+/**
+ * Fungsi Utama untuk Menyalakan Bot
+ */
 async function startBot() {
     if (!state) return;
     
-    // Pastikan kita pakai token terbaru dari state (bukan config statis)
+    // Refresh data dari bot_config.json
+    state.reload();
     const currentToken = state.BOT_TOKEN;
 
-    if (!currentToken || currentToken === "") {
-        console.log("[WARNING] BOT_TOKEN di JSON masih kosong. Menunggu konfigurasi dari HP...");
-        state.statusText = "Konfigurasi Belum Lengkap";
+    if (!currentToken) {
+        console.log("[WARNING] BOT_TOKEN kosong. Bot tidak bisa dimulai.");
+        state.statusText = "Token Belum Diatur";
         return;
     }
 
     if (state.isBotRunning) {
-        console.log("[MAIN] Bot sudah berjalan.");
+        console.log("[MAIN] Bot sudah dalam status Running.");
         return;
     }
 
@@ -53,59 +53,84 @@ async function startBot() {
     console.log(`[MAIN] Menyalakan Bot dengan Token: ${currentToken.substring(0, 10)}...`);
 
     try {
+        // 1. Inisialisasi Database
         db.initializeFiles();
         
-        // Browser bersifat opsional, jangan sampai menghambat polling Telegram
-        scraper.initBrowser().then(() => {
-            state.statusText = "Browser Aktif";
-        }).catch(e => {
-            console.log("[BROWSER] Error awal (Abaikan jika RDP lambat):", e.message);
-        });
-
-        rangeModule.start();
-        messageModule.start();
-        smsModule.start();
-
+        // 2. Jalankan Polling Telegram & Monitor Kadaluarsa (Langsung Aktif)
         startTelegramLoop();
         startExpiryMonitor();
         
-        state.statusText = "Running";
-        console.log("[MAIN] Semua Sistem Online.");
+        // 3. Jalankan API Server (AideApp)
+        if (aideApp && aideApp.startServer) {
+            aideApp.startServer();
+        }
+
+        // 4. Inisialisasi Browser & Login (Async Background)
+        console.log("[BROWSER] Menyiapkan browser dan login...");
+        scraper.initBrowser().then(() => {
+            state.statusText = "Running (Browser Active)";
+            
+            // 5. Jalankan Modul Monitoring SETELAH browser siap & login sukses
+            // Modul-modul ini akan menggunakan state.sharedPage
+            console.log("[MAIN] Menjalankan modul monitoring (Range/Message/SMS)...");
+            rangeModule.start();
+            messageModule.start();
+            smsModule.start();
+            
+        }).catch(e => {
+            console.error("[BROWSER] Gagal inisialisasi browser:", e.message);
+            state.statusText = "Running (No Browser)";
+        });
+
+        console.log("[MAIN] Sistem Telegram Online.");
     } catch (err) {
         console.error("[MAIN ERROR]", err);
         state.isBotRunning = false;
-        state.statusText = "Error";
+        state.statusText = "Critical Error";
     }
 }
 
+/**
+ * Fungsi untuk Mematikan Bot secara Bersih
+ */
 async function stopBot() {
     if (!state || !state.isBotRunning) return;
     state.isBotRunning = false;
-    state.statusText = "Stopped";
+    state.statusText = "Stopping...";
     
+    // Hentikan semua interval modul
     if (rangeModule.stop) rangeModule.stop();
     if (messageModule.stop) messageModule.stop();
     if (smsModule.stop) smsModule.stop();
     if (expiryInterval) clearInterval(expiryInterval);
 
+    // Tutup Browser jika ada
     if (state.browser) {
-        try { await state.browser.close(); } catch(e){}
+        try { 
+            await state.browser.close(); 
+            console.log("[BROWSER] Browser closed.");
+        } catch(e){}
         state.browser = null;
+        state.sharedPage = null;
     }
+    
     console.log("[MAIN] Bot Berhasil Dimatikan.");
+    state.statusText = "Stopped";
 }
 
+/**
+ * Fungsi Restart
+ */
 async function restartBot() {
     console.log("[MAIN] Restarting Bot...");
     await stopBot();
-    // Tunggu sebentar lalu reload data dari JSON
-    await new Promise(r => setTimeout(r, 1000));
-    state.reload(); 
+    await new Promise(r => setTimeout(r, 2000));
     await startBot();
 }
 
-// --- Background Loops ---
-
+/**
+ * Monitor Durasi Nomor di WaitList
+ */
 function startExpiryMonitor() {
     if (expiryInterval) clearInterval(expiryInterval);
     expiryInterval = setInterval(async () => {
@@ -115,11 +140,13 @@ function startExpiryMonitor() {
             if (!waitList || !Array.isArray(waitList)) return;
             const now = Date.now() / 1000;
             const updatedList = [];
+            
             for (const item of waitList) {
                 if (item.otp_received_time) {
                     updatedList.push(item);
                     continue;
                 }
+                // Jika sudah lebih dari 20 menit (1200 detik)
                 if (now - item.timestamp > 1200) { 
                     await tg.tgSend(item.user_id, `⚠️ Nomor <code>${item.number}</code> telah kadaluarsa.`);
                 } else {
@@ -128,72 +155,82 @@ function startExpiryMonitor() {
             }
             db.saveWaitList(updatedList);
         } catch (e) {}
-    }, 30000); // Cek per 30 detik saja agar tidak berat
+    }, 30000);
 }
 
+/**
+ * Loop Polling Telegram
+ */
 function startTelegramLoop() {
     if (telegramLoopInterval) return;
     let offset = 0;
     
     const loop = async () => {
         telegramLoopInterval = true; 
+        console.log("[TG] Polling started.");
+        
         while (state.isBotRunning) {
             try {
-                // Gunakan tgGetUpdates yang sudah menggunakan state.API_URL
                 const data = await tg.tgGetUpdates(offset);
                 if (data && data.ok && data.result) {
                     for (const upd of data.result) {
                         offset = upd.update_id + 1;
                         if (upd.message) {
-                            commands.processCommand(upd.message).catch(e => console.error(e));
+                            commands.processCommand(upd.message).catch(e => console.error("[CMD ERR]", e.message));
                         }
                         if (upd.callback_query) {
-                            callbacks.processCallback(upd.callback_query).catch(e => console.error(e));
+                            callbacks.processCallback(upd.callback_query).catch(e => console.error("[CB ERR]", e.message));
                         }
                     }
                 }
             } catch (e) {
-                console.error("[TG LOOP ERROR]", e.message);
-                await new Promise(r => setTimeout(r, 5000)); // Delay jika error koneksi
+                // Delay panjang jika terjadi error koneksi berat
+                await new Promise(r => setTimeout(r, 5000));
             }
-            await new Promise(r => setTimeout(r, 500));
+            // Delay pendek antar polling
+            await new Promise(r => setTimeout(r, 700));
         }
         telegramLoopInterval = null;
     };
     loop();
 }
 
-// --- Jalankan Server ---
-
-console.log("[AIDE] Menjalankan API Server...");
-if (aideApp && aideApp.startServer) {
-    aideApp.startServer();
-}
-
-// Cron untuk refresh browser tiap pagi jam 7
+/**
+ * Penjadwalan Tugas (Cron)
+ */
+// Refresh browser setiap jam 7 pagi untuk membersihkan cache/leak
 cron.schedule('0 7 * * *', async () => {
     if (state && state.isBotRunning) {
+        console.log("[CRON] Refreshing browser session...");
         const release = await playwrightLock.acquire();
-        try { await scraper.initBrowser(); } finally { release(); }
+        try { 
+            await scraper.initBrowser(); 
+        } finally { 
+            release(); 
+        }
     }
 });
 
-// AUTO-START CHECK (MENGGUNAKAN STATE)
-if (state.BOT_TOKEN && state.BOT_TOKEN !== "") {
-    startBot();
-} else {
-    state.statusText = "Menunggu Konfigurasi";
-    console.log("[MAIN] Server Aktif. Token belum ada di bot_config.json.");
-    
-    // Opsional: Cek berkala apakah token sudah diisi lewat HP
-    const checkConfig = setInterval(() => {
-        state.reload();
-        if (state.BOT_TOKEN) {
-            console.log("[MAIN] Token ditemukan! Menjalankan bot...");
-            startBot();
-            clearInterval(checkConfig);
-        }
-    }, 5000);
-}
+/**
+ * Prosedur Auto-Start
+ */
+(() => {
+    state.reload();
+    if (state.BOT_TOKEN) {
+        startBot();
+    } else {
+        state.statusText = "Menunggu Token";
+        console.log("[MAIN] Menunggu BOT_TOKEN di bot_config.json...");
+        
+        const checkConfig = setInterval(() => {
+            state.reload();
+            if (state.BOT_TOKEN) {
+                console.log("[MAIN] Token terdeteksi! Menjalankan bot...");
+                startBot();
+                clearInterval(checkConfig);
+            }
+        }, 5000);
+    }
+})();
 
 module.exports = { startBot, stopBot, restartBot };
