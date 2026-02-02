@@ -1,46 +1,45 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const { state } = require('./helpers/state'); 
 const config = require('./config');
-
-// Path ke file konfigurasi global
-const CONFIG_PATH = path.join(process.cwd(), 'bot_config.json');
 
 let monitorLoop = null;
 let monitorPage = null; 
 
-// Ingatan internal module (State Mandiri)
+// Path ke file konfigurasi utama
+const CONFIG_PATH = path.join(process.cwd(), 'bot_config.json');
+
+// Memory Sesi Internal
 let sessionConfig = {
     token: null,
     chatId: null,
     botLink: null,
     targetUrl: null,
-    adminLink: null
+    urlAdmin: null
 };
 
 /**
- * Fungsi untuk mengambil data langsung dari bot_config.json
- * Berjalan saat start atau saat dipanggil manual
+ * Mengambil data langsung dari file bot_config.json secara mandiri
  */
-function syncSession() {
+function loadConfigFromFile() {
     try {
         if (fs.existsSync(CONFIG_PATH)) {
-            const fileContent = fs.readFileSync(CONFIG_PATH, 'utf-8');
-            const data = JSON.parse(fileContent);
+            const fileData = fs.readFileSync(CONFIG_PATH, 'utf8');
+            const json = JSON.parse(fileData);
+            
+            sessionConfig.token = json.BOT_TOKEN_RANGE || json.BOT_TOKEN_MESSAGE;
+            sessionConfig.chatId = String(json.CHAT_ID_RANGE || "").trim();
+            sessionConfig.botLink = json.URL_GETNUM;
+            sessionConfig.targetUrl = json.URL_TARGET_RANGE;
+            sessionConfig.urlAdmin = json.URL_ADMIN;
 
-            sessionConfig.token = data.BOT_TOKEN_RANGE || data.BOT_TOKEN_MESSAGE;
-            sessionConfig.chatId = String(data.CHAT_ID_RANGE || "").trim();
-            sessionConfig.botLink = data.URL_GETNUM || "https://t.me/";
-            sessionConfig.targetUrl = data.URL_TARGET_RANGE;
-            sessionConfig.adminLink = data.URL_ADMIN;
-
-            console.log("[RANGE] Konfigurasi berhasil dimuat dari bot_config.json");
-        } else {
-            console.error("[RANGE] File bot_config.json tidak ditemukan!");
+            return true;
         }
-    } catch (e) {
-        console.error("[RANGE] Gagal membaca bot_config.json:", e.message);
+    } catch (err) {
+        console.error("[RANGE] Gagal membaca bot_config.json:", err.message);
     }
+    return false;
 }
 
 let SENT_MESSAGES = new Map();
@@ -48,24 +47,22 @@ let CACHE_SET = new Set();
 let MESSAGE_QUEUE = []; 
 let IS_PROCESSING_QUEUE = false; 
 
-// Helper untuk keamanan karakter HTML Telegram
 const escapeHTML = (str) => {
     if (!str) return "";
     return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 };
 
-/**
- * Pengiriman antrian pesan ke Telegram
- */
 async function processQueue() {
     if (IS_PROCESSING_QUEUE || MESSAGE_QUEUE.length === 0) return;
     IS_PROCESSING_QUEUE = true;
 
     while (MESSAGE_QUEUE.length > 0) {
-        const item = MESSAGE_QUEUE.shift();
+        // Refresh config dari file sebelum mengirim pesan
+        loadConfigFromFile();
         
-        if (!sessionConfig.token || !sessionConfig.chatId || sessionConfig.chatId === "") {
-            console.error("[RANGE] Skip: Token atau Chat ID tidak valid.");
+        const item = MESSAGE_QUEUE.shift();
+        if (!sessionConfig.token || !sessionConfig.chatId) {
+            console.error("[RANGE] Skip: Token atau Chat ID tidak ditemukan di config.");
             continue;
         }
 
@@ -81,7 +78,6 @@ async function processQueue() {
                 }).catch(() => {});
             }
 
-            // Kirim pesan baru
             const res = await axios.post(`${API_URL}/sendMessage`, {
                 chat_id: sessionConfig.chatId,
                 text: item.text,
@@ -89,8 +85,8 @@ async function processQueue() {
                 disable_web_page_preview: true,
                 reply_markup: { 
                     inline_keyboard: [
-                        [{ text: "📞 Get Number", url: sessionConfig.botLink }],
-                        [{ text: "👨‍💻 Admin", url: sessionConfig.adminLink || "https://t.me/" }]
+                        [{ text: "📞 Get Number", url: sessionConfig.botLink || "https://t.me/" }],
+                        [{ text: "👨‍💻 Admin", url: sessionConfig.urlAdmin || "https://t.me/" }]
                     ] 
                 }
             });
@@ -117,43 +113,40 @@ const formatLiveMessage = (rangeVal, count, countryName, service, fullMessage) =
            `📱 Range: ${rangeDisplay}\n` +
            `${emoji} Country: ${escapeHTML(countryName)}\n` +
            `⚙️ Service: ${escapeHTML(service)}\n\n` +
-           `🗯️ <b>Message Available:</b>\n` +
+           `🗯️ <b>Message:</b>\n` +
            `<blockquote>${escapeHTML(fullMessage)}</blockquote>`;
 };
 
-/**
- * Memulai monitoring browser
- * @param {Object} browserInstance - Instance browser dari playwright (dikirim dari main script)
- */
-async function start(browserInstance) {
+async function start() {
     if (monitorLoop) return; 
     
-    // Ambil data mandiri dari JSON
-    syncSession();
-    
-    if (!sessionConfig.targetUrl) {
-        console.error("[RANGE] Module tidak bisa jalan: URL_TARGET_RANGE kosong.");
-        return;
+    // Load config saat pertama kali jalan
+    if (!loadConfigFromFile()) {
+        console.log("[RANGE] Menunggu file bot_config.json tersedia...");
     }
-
+    
     console.log("🚀 [RANGE] Module Started (Independent Mode).");
     
     monitorLoop = setInterval(async () => {
-        // Module ini butuh instance browser yang dikirim saat start
-        if (!browserInstance) return;
+        // Cek apakah browser utama di state sudah siap
+        if (!state.browser) return;
+
+        // Selalu sinkronkan config setiap interval agar up-to-date
+        loadConfigFromFile();
 
         try {
             if (!monitorPage || monitorPage.isClosed()) {
-                const contexts = browserInstance.contexts();
-                const context = contexts.length > 0 ? contexts[0] : await browserInstance.newContext();
+                const context = state.browser.contexts()[0] || await state.browser.newContext();
                 monitorPage = await context.newPage();
             }
 
+            if (!sessionConfig.targetUrl) return;
+
             if (!monitorPage.url().includes(sessionConfig.targetUrl)) {
-                await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
+                await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
             }
 
-            // Selector fleksibel untuk menangkap card pesan
+            // Seleksi elemen card di dashboard console
             const elements = await monitorPage.locator("div.p-3.rounded-lg").all();
 
             for (const el of elements) {
@@ -163,7 +156,6 @@ async function start(browserInstance) {
 
                     const lines = rawText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
                     
-                    // Parsing data dari elemen
                     const country = rawText.includes("•") ? rawText.split("•")[1].split("\n")[0].trim() : "Unknown";
                     const service = lines[0] || "Unknown";
                     const phoneRaw = lines.find(l => l.includes("XXX")) || "";
@@ -172,14 +164,14 @@ async function start(browserInstance) {
                     const phone = phoneRaw.replace(/[^0-9X]/g, '');
                     if (!phone.includes('XXX')) continue;
 
-                    const cacheKey = `${phone}_${msgRaw.substring(0, 15)}`;
+                    const cacheKey = `${phone}_${msgRaw.substring(0, 20)}`;
 
                     if (!CACHE_SET.has(cacheKey)) {
                         CACHE_SET.add(cacheKey);
                         const currentData = SENT_MESSAGES.get(phone) || { count: 0 };
                         const newCount = currentData.count + 1;
                         
-                        console.log(`[RANGE] New Hit detected: ${phone}`);
+                        console.log(`[RANGE] New Hit: ${phone} (${country})`);
 
                         MESSAGE_QUEUE.push({
                             rangeVal: phone,
@@ -191,9 +183,9 @@ async function start(browserInstance) {
                 } catch (e) {}
             }
         } catch (e) {
-            // Jika error karena browser tertutup, module akan mencoba lagi di loop berikutnya
+            // console.error("[RANGE] Loop Error:", e.message);
         }
-    }, 15000);
+    }, 12000);
 }
 
 function stop() {
@@ -204,5 +196,8 @@ function stop() {
         console.log("🛑 [RANGE] Module Stopped.");
     }
 }
+
+// syncSession sekarang hanya alias untuk loadConfigFromFile agar kompatibel dengan script luar
+const syncSession = loadConfigFromFile;
 
 module.exports = { start, stop, syncSession };
