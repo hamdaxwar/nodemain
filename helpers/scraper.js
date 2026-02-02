@@ -128,7 +128,7 @@ async function processUserInput(userId, prefix, clickCount, usernameTg, firstNam
     let actionInterval = null;
     const numToFetch = clickCount;
 
-    if (playwrightLock.isLocked()) {
+    if (playwrightLock) { 
         if (!msgId) msgId = await tg.tgSend(userId, getProgressMessage(0, 0, prefix, numToFetch));
         else await tg.tgEdit(userId, msgId, getProgressMessage(0, 0, prefix, numToFetch));
     }
