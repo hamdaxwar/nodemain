@@ -2,52 +2,82 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { state } = require('./helpers/state');
-const config = require('./config');
 
-let monitorLoop = null;
-let monitorPage = null;
+// ================= KONFIGURASI =================
+const CONFIG_FILE = path.join(__dirname, "bot_config.json");
+const SMC_JSON_FILE = path.join(__dirname, "smc.json");
+const WAIT_JSON_FILE = path.join(__dirname, "wait.json");
+const CACHE_FILE = path.join(__dirname, 'otp_cache.json');
+const COUNTRY_EMOJI = require('./country.json');
 
-// Sesi Memory (Hanya cari lagi jika sesi restart/reload)
-let sessionConfig = {
-    token: null,
-    chatId: null,
-    adminUrl: null,
-    botLink: null,
-    targetUrl: null
+// Ingatan Sementara (In-Memory Cache) agar tidak terus-menerus baca file
+let configMemo = {
+    BOT_TOKEN: "",
+    CHAT_ID: "",
+    ADMIN_ID: "",
+    URL_GETNUM: "",
+    URL_ADMIN: "",
+    URL_TARGET: ""
 };
 
 /**
- * Sinkronisasi Sesi dari State (JSON)
+ * Memulihkan ingatan konfigurasi dari file
  */
-function syncSession() {
-    // state.reload() sudah dipanggil di main/state, kita tinggal ambil nilainya
-    sessionConfig.token = state.BOT_TOKEN_MESSAGE || state.BOT_TOKEN;
-    sessionConfig.chatId = state.CHAT_ID_MESSAGE;
-    sessionConfig.adminUrl = state.URL_ADMIN;
-    sessionConfig.botLink = state.URL_GETNUM;
-    sessionConfig.targetUrl = state.URL_TARGET_MESSAGE;
-    console.log("[MESSAGE] Sesi Config Sinkron.");
+function refreshConfigMemo() {
+    try {
+        if (fs.existsSync(CONFIG_FILE)) {
+            const data = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+            configMemo.BOT_TOKEN = data.BOT_TOKEN_MESSAGE;
+            configMemo.CHAT_ID = data.CHAT_ID_MESSAGE;
+            configMemo.ADMIN_ID = data.ADMIN_ID;
+            configMemo.URL_GETNUM = data.URL_GETNUM;
+            configMemo.URL_ADMIN = data.URL_ADMIN;
+            configMemo.URL_TARGET = data.URL_TARGET_MESSAGE || "https://stexsms.com/mdashboard/getnum";
+            console.log("♻️ [CONFIG] Ingatan konfigurasi diperbarui dari bot_config.json");
+        }
+    } catch (e) {
+        console.error("❌ [CONFIG] Gagal membaca bot_config.json:", e.message);
+    }
 }
 
-const SMC_JSON_FILE = path.join(process.cwd(), "smc.json");
-const WAIT_JSON_FILE = path.join(process.cwd(), "wait.json");
-const CACHE_FILE = path.join(process.cwd(), 'otp_cache.json');
+// Jalankan pengambilan config pertama kali saat script start
+refreshConfigMemo();
 
-// --- Utils ---
+let totalSent = 0;
+let lastUpdateId = 0;
+const startTime = Date.now();
+let monitorPage = null;
+
+// ================= UTILS =================
+
 function escapeHtml(text) {
     if (!text) return "";
-    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+function getCountryEmoji(country) {
+    return COUNTRY_EMOJI[country?.trim().toUpperCase()] || "🏴‍☠️";
 }
 
 function getCache() {
-    if (fs.existsSync(CACHE_FILE)) {
-        try { return JSON.parse(fs.readFileSync(CACHE_FILE)); } catch (e) { return {}; }
+    if (!fs.existsSync(CACHE_FILE)) return [];
+    try {
+        const data = JSON.parse(fs.readFileSync(CACHE_FILE));
+        return Array.isArray(data) ? data : [];
+    } catch {
+        return [];
     }
-    return {};
 }
 
 function saveToCache(cache) {
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
+    // Batasi cache agar tidak membengkak (misal 500 terakhir)
+    const limitedCache = cache.slice(-500);
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(limitedCache, null, 2));
 }
 
 function getUserData(phoneNumber) {
@@ -57,15 +87,21 @@ function getUserData(phoneNumber) {
         const cleanTarget = phoneNumber.replace(/[^\d]/g, '');
         for (const entry of waitList) {
             const cleanEntry = String(entry.number || "").replace(/[^\d]/g, '');
-            if (cleanTarget === cleanEntry) return { username: entry.username || "unknown", user_id: entry.user_id };
+            if (cleanTarget === cleanEntry) {
+                return { username: entry.username || "unknown", user_id: entry.user_id };
+            }
         }
-    } catch (e) { }
+    } catch (e) { /* ignore */ }
     return { username: "unknown", user_id: null };
 }
 
 function extractOtp(text) {
     if (!text) return null;
-    const patterns = [/(\d{3}[\s-]\d{3})/, /(?:code|otp|kode)[:\s]*([\d\s-]+)/i, /\b(\d{4,8})\b/];
+    const patterns = [
+        /(\d{3}[\s-]\d{3})/, 
+        /(?:code|otp|kode)[:\s]*([\d\s-]+)/i,
+        /\b(\d{4,8})\b/
+    ];
     for (const p of patterns) {
         const m = text.match(p);
         if (m) {
@@ -76,119 +112,182 @@ function extractOtp(text) {
     return null;
 }
 
-async function sendTelegram(text, otpCode = null) {
-    // Gunakan nilai dari ingatan sesi
-    const API_URL_MESSAGE = `https://api.telegram.org/bot${sessionConfig.token}`;
+function maskPhone(phone) {
+    if (!phone || phone === "N/A") return phone;
+    const digits = phone.replace(/[^\d]/g, '');
+    if (digits.length < 7) return phone;
+    const prefix = phone.startsWith('+') ? '+' : '';
+    return `${prefix}${digits.slice(0, 5)}***${digits.slice(-4)}`;
+}
 
+async function sendTelegram(text, otpCode = null, targetChat = null) {
+    const finalChatId = targetChat || configMemo.CHAT_ID;
+    const url = `https://api.telegram.org/bot${configMemo.BOT_TOKEN}/sendMessage`;
+    
     const payload = {
-        chat_id: sessionConfig.chatId,
+        chat_id: finalChatId,
         text: text,
         parse_mode: 'HTML',
         disable_web_page_preview: true
     };
 
     if (otpCode) {
-    payload.reply_markup = {
-        inline_keyboard: [
-            [
-                {
-                    text: ` Copy OTP: ${otpCode}`,
-                    copy_text: {
-                        text: otpCode
-                    }
-                },
-                {
-                    text: "🎭 Owner",
-                    url: sessionConfig.adminUrl
-                }
-            ],
-            [
-                {
-                    text: "📞 Get Number",
-                    url: sessionConfig.botLink
-                }
+        payload.reply_markup = {
+            inline_keyboard: [
+                [
+                    { text: ` ${otpCode}`, copy_text: { text: otpCode } }, 
+                    { text: "🎭 Owner", url: configMemo.URL_ADMIN }
+                ],
+                [{ text: "📞 Get Number", url: configMemo.URL_GETNUM }]
             ]
-        ]
-    };
+        };
     }
-    
+
     try {
-        await axios.post(`${API_URL_MESSAGE}/sendMessage`, payload);
+        await axios.post(url, payload);
     } catch (e) {
-        console.error("❌ [MESSAGE] Kirim Gagal:", e.message);
+        console.error(`❌ [TG ERROR] ${e.message}`);
     }
 }
 
-async function start() {
-    if (monitorLoop) return;
-    
-    // Inisialisasi Ingatan Sesi saat Start
-    syncSession();
-    console.log("🚀 [MESSAGE] Module Started.");
+// ================= COMMAND HANDLERS =================
 
-    monitorLoop = setInterval(async () => {
-        if (!state.isBotRunning || !state.browser) return;
+async function checkTelegramCommands() {
+    try {
+        const resp = await axios.get(`https://api.telegram.org/bot${configMemo.BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=1`);
+        if (resp.data && resp.data.result) {
+            for (const u of resp.data.result) {
+                lastUpdateId = u.update_id;
+                const m = u.message;
+                if (!m || String(m.from.id) !== String(configMemo.ADMIN_ID)) continue;
 
-        try {
-            if (!monitorPage || monitorPage.isClosed()) {
-                const contexts = state.browser.contexts();
-                const context = contexts.length > 0 ? contexts[0] : await state.browser.newContext();
-                monitorPage = await context.newPage();
+                if (m.text === "/status") {
+                    const uptime = Math.floor((Date.now() - startTime) / 1000);
+                    const h = Math.floor(uptime / 3600);
+                    const min = Math.floor((uptime % 3600) / 60);
+                    const msg = `🤖 <b>Zura Status</b>\n⚡ Live: ✅\nUptime: <code>${h}h ${min}m</code>\nTotal Sent: <b>${totalSent}</b>`;
+                    await sendTelegram(msg, null, configMemo.ADMIN_ID);
+                } else if (m.text === "/refresh") {
+                    if (monitorPage) {
+                        await monitorPage.reload({ waitUntil: 'networkidle' }).catch(() => {});
+                        await sendTelegram("🔄 Halaman telah direfresh manual.", null, configMemo.ADMIN_ID);
+                    }
+                }
             }
+        }
+    } catch (e) {}
+}
 
-            // Gunakan URL dari ingatan sesi
-            if (!monitorPage.url().includes(sessionConfig.targetUrl)) {
-                await monitorPage.goto(sessionConfig.targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
-            }
+// ================= MONITORING LOGIC =================
 
-            const responsePromise = monitorPage.waitForResponse(r => r.url().includes("/getnum/info"), { timeout: 5000 }).catch(() => null);
-            await monitorPage.click('th:has-text("Number Info")', { timeout: 1000 }).catch(() => {});
-            
-            const response = await responsePromise;
-            if (response) {
-                const json = await response.json();
-                const numbers = json?.data?.numbers || [];
+async function startSmsMonitor() {
+    console.log("🚀 [MESSAGE] Monitoring SMS otomatis dimulai...");
 
-                for (const item of numbers) {
-                    if (item.status === 'success' && item.message) {
-                        const otp = extractOtp(item.message);
-                        const phone = "+" + item.number;
-                        const key = `${otp}_${phone}`;
-                        const cache = getCache();
+    const checkState = setInterval(() => {
+        if (state.browser) {
+            clearInterval(checkState);
+            console.log("✅ [MESSAGE] Browser siap. Menempel ke dashboard dalam 5 detik...");
+            setTimeout(() => runLoop(), 5000);
+        }
+    }, 2000);
 
-                        if (otp && !cache[key]) {
-                            cache[key] = { t: new Date().toISOString() };
-                            saveToCache(cache);
+    async function runLoop() {
+        while (true) {
+            try {
+                // LOGIKA REFRESH JAM 7 PAGI WIB (Asia/Jakarta)
+                const now = new Date();
+                const jktTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Jakarta"}));
+                if (jktTime.getHours() === 7 && jktTime.getMinutes() === 0 && jktTime.getSeconds() < 15) {
+                    if (monitorPage) {
+                        console.log("⏰ [JADWAL] Jam 07:00 WIB - Auto Refresh Halaman...");
+                        await monitorPage.reload({ waitUntil: 'networkidle' }).catch(() => {});
+                        await new Promise(r => setTimeout(r, 15000)); // Tunggu agar tidak refresh berkali-kali dalam 1 menit
+                    }
+                }
 
-                            const user = getUserData(phone);
-                            const userTag = user.username !== "unknown" ? `@${user.username}` : `ID: ${user.user_id}`;
-                            const emoji = config.COUNTRY_EMOJI[item.country?.trim().toUpperCase()] || "🏴‍☠️";
+                if (!monitorPage || monitorPage.isClosed()) {
+                    const contexts = state.browser.contexts();
+                    const context = contexts.length > 0 ? contexts[0] : await state.browser.newContext();
+                    monitorPage = await context.newPage();
+                }
+
+                if (!monitorPage.url().includes('/getnum')) {
+                    await monitorPage.goto(configMemo.URL_TARGET, { waitUntil: 'domcontentloaded' }).catch(() => {});
+                }
+
+                const responsePromise = monitorPage.waitForResponse(r => r.url().includes("/getnum/info"), { timeout: 5000 }).catch(() => null);
+                
+                // Trigger refresh data di dashboard
+                await monitorPage.click('th:has-text("Number Info")', { timeout: 1000 }).catch(() => {});
+                
+                const response = await responsePromise;
+                if (response) {
+                    const json = await response.json();
+                    const numbers = json?.data?.numbers || [];
+
+                    for (const item of numbers) {
+                        if (item.status === 'success' && item.message) {
+                            const otp = extractOtp(item.message);
+                            const phone = "+" + item.number;
                             
-                            const msg = `💭 <b>New Message Received</b>\n\n` +
-                                        `<b>👤 User:</b> ${userTag}\n` +
-                                        `<b>📱 Number:</b> <code>${phone}</code>\n` +
-                                        `<b>🌍 Country:</b> <b>${item.country} ${emoji}</b>\n` +
-                                        `<b>✅ Service:</b> <b>${item.full_number}</b>\n\n` +
-                                        `🔐 OTP: <code>${otp}</code>\n\n` +
-                                        `<b>FULL MESSAGE:</b>\n` +
-                                        `<blockquote>${escapeHtml(item.message)}</blockquote>`;
-                            
-                            await sendTelegram(msg, otp);
+                            const cache = getCache();
+                            const alreadyExists = cache.some(c => c.Number === phone && c.Otp === otp);
+
+                            if (otp && !alreadyExists) {
+                                // Simpan ke Cache format Array
+                                cache.push({
+                                    Number: phone,
+                                    Otp: otp,
+                                    Service: item.full_number || "N/A",
+                                    t: new Date().toISOString()
+                                });
+                                saveToCache(cache);
+
+                                // Simpan ke Log SMC (History)
+                                const entry = {
+                                    service: item.full_number || "Service",
+                                    number: phone,
+                                    otp: otp,
+                                    full_message: item.message,
+                                    timestamp: new Date().toLocaleString()
+                                };
+                                
+                                let existingLog = [];
+                                if (fs.existsSync(SMC_JSON_FILE)) {
+                                    try { existingLog = JSON.parse(fs.readFileSync(SMC_JSON_FILE)); } catch(e){}
+                                }
+                                existingLog.push(entry);
+                                fs.writeFileSync(SMC_JSON_FILE, JSON.stringify(existingLog.slice(-100), null, 2));
+
+                                // Identifikasi Pembeli (Wait List)
+                                const user = getUserData(phone);
+                                const userTag = user.username !== "unknown" ? `@${user.username}` : "unknown";
+                                const emoji = getCountryEmoji(item.country || "");
+                                const safeFullMessage = escapeHtml(item.message);
+                                
+                                const msg = `💭 <b>New Message Received</b>\n\n` +
+                                            `<b>👤 User:</b> ${userTag}\n` +
+                                            `<b>📱 Number:</b> <code>${maskPhone(phone)}</code>\n` +
+                                            `<b>🌍 Country:</b> <b>${item.country || "N/A"} ${emoji}</b>\n` +
+                                            `<b>✅ Service:</b> <b>${item.full_number || "N/A"}</b>\n\n` +
+                                            `🔐 OTP: <code>${otp}</code>\n\n` +
+                                            `<b>FULL MESSAGE:</b>\n` +
+                                            `<blockquote>${safeFullMessage}</blockquote>`;
+                                
+                                await sendTelegram(msg, otp);
+                                totalSent++;
+                            }
                         }
                     }
                 }
+            } catch (e) {
+                console.error("❌ [MESSAGE] Loop Error:", e.message);
             }
-        } catch (e) { }
-    }, 10000); 
-}
-
-function stop() {
-    if (monitorLoop) {
-        clearInterval(monitorLoop);
-        monitorLoop = null;
-        if (monitorPage) monitorPage.close().catch(()=>{});
-        console.log("🛑 [MESSAGE] Module Stopped.");
+            
+            await checkTelegramCommands();
+            await new Promise(r => setTimeout(r, 10000)); // Delay 10 detik per loop
+        }
     }
 }
 
-module.exports = { start, stop, syncSession };
+startSmsMonitor();
