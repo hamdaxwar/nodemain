@@ -1,8 +1,8 @@
 const fs = require('fs');
 const axios = require('axios');
 const path = require('path');
-const config = require('./config');
-const { state } = require('./helpers/state');
+const config = require('../config');
+const { state } = require('./state');
 
 let smsLoop = null;
 
@@ -26,15 +26,24 @@ function updateProfileOtp(userId) {
     const today = new Date().toISOString().split('T')[0];
 
     if (!profiles[strId]) {
-        profiles[strId] = { name: "User", balance: 0.0, otp_semua: 0, otp_hari_ini: 0, last_active: today };
+        profiles[strId] = { 
+            name: "User", 
+            balance: 0.0, 
+            otp_semua: 0, 
+            otp_hari_ini: 0, 
+            last_active: today 
+        };
     }
     const p = profiles[strId];
     if (p.last_active !== today) { p.otp_hari_ini = 0; p.last_active = today; }
 
-    const oldBal = p.balance || 0.0;
+    const oldBal = parseFloat(p.balance || 0.0);
+    // Harga OTP mengikuti state (bot_config.json)
+    const otpPrice = parseFloat(state.OTP_PRICE || 0.003500);
+    
     p.otp_semua = (p.otp_semua || 0) + 1;
     p.otp_hari_ini = (p.otp_hari_ini || 0) + 1;
-    p.balance = oldBal + config.OTP_PRICE;
+    p.balance = oldBal + otpPrice;
 
     saveJson(config.FILES.PROFILE, profiles);
     return { old: oldBal, new: p.balance };
@@ -42,7 +51,8 @@ function updateProfileOtp(userId) {
 
 async function tgApi(method, data) {
     try {
-        await axios.post(`${config.API_URL}/${method}`, data, { timeout: 10000 });
+        const apiUrl = state.API_URL || config.API_URL;
+        await axios.post(`${apiUrl}/${method}`, data, { timeout: 10000 });
     } catch (e) {}
 }
 
@@ -81,7 +91,10 @@ async function checkAndForward() {
         for (let i = 0; i < smsData.length; i++) {
             const sms = smsData[i];
             const smsNum = String(sms.number || sms.Number || "");
-            if (smsNum === waitNum) { targetSmsIndex = i; break; }
+            if (smsNum === waitNum || smsNum.includes(waitNum.replace('+', ''))) { 
+                targetSmsIndex = i; 
+                break; 
+            }
         }
 
         if (targetSmsIndex !== -1) {
@@ -108,8 +121,21 @@ async function checkAndForward() {
                             `🗯️ <b>Full Message:</b>\n<blockquote>${raw}</blockquote>\n\n` +
                             `⚡ <b>Tap the Button To Copy OTP</b> ⚡`;
 
-            const kb = { inline_keyboard: [[{ text: ` ${otp}`, copy_text: { text: otp } }, { text: "💸 Donate", url: "https://t.me/" }]] };
-            await tgApi("sendMessage", { chat_id: userId, text: msgBody, reply_markup: kb, parse_mode: "HTML" });
+            const kb = { 
+                inline_keyboard: [
+                    [
+                        { text: ` ${otp}`, copy_text: { text: otp } }, 
+                        { text: "💸 Donate", url: "https://zurastore.my.id/donate" }
+                    ]
+                ] 
+            };
+
+            await tgApi("sendMessage", { 
+                chat_id: userId, 
+                text: msgBody, 
+                reply_markup: kb, 
+                parse_mode: "HTML" 
+            });
 
             waitItem.otp_received_time = currentTime;
             newWaitList.push(waitItem);
@@ -122,12 +148,11 @@ async function checkAndForward() {
     saveJson(config.FILES.WAIT, newWaitList);
 }
 
-// --- Module Controls ---
 function start() {
     if (smsLoop) return;
     console.log("🚀 [SMS DISTRIBUTOR] Module Started.");
     smsLoop = setInterval(async () => {
-        if (!state.isBotRunning) { stop(); return; }
+        if (!state.isBotRunning) return;
         await checkAndForward();
     }, 2000);
 }
@@ -141,4 +166,3 @@ function stop() {
 }
 
 module.exports = { start, stop };
-
