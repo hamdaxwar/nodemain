@@ -1,51 +1,96 @@
 const fs = require('fs');
 const path = require('path');
 
-// Lokasi bot_config.json di root folder
-const CONFIG_FILE = path.join(__dirname, '../bot_config.json');
+// Menggunakan process.cwd() agar path selalu merujuk ke folder root aplikasi
+const CONFIG_FILE = path.join(process.cwd(), 'bot_config.json');
 
+/**
+ * Fungsi internal untuk memuat config dengan pelacakan error
+ */
 function loadRawConfig() {
+    const result = { data: {}, error: null };
     try {
-        if (fs.existsSync(CONFIG_FILE)) {
-            return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        if (!fs.existsSync(CONFIG_FILE)) {
+            result.error = `File tidak ditemukan di path: ${CONFIG_FILE}`;
+            return result;
         }
+
+        const rawData = fs.readFileSync(CONFIG_FILE, 'utf8');
+        if (!rawData || rawData.trim() === "") {
+            result.error = "File bot_config.json kosong!";
+            return result;
+        }
+
+        result.data = JSON.parse(rawData);
     } catch (e) {
-        console.error("[STATE] Error reading JSON:", e.message);
+        if (e instanceof SyntaxError) {
+            result.error = `Format JSON rusak: ${e.message}`;
+        } else {
+            result.error = `Gagal membaca file: ${e.message}`;
+        }
     }
-    return {};
+    return result;
 }
 
 const state = {
-    // Status Internal Bot
+    // --- Status Bot ---
     isBotRunning: false,
     statusText: "Idle",
-    browser: null,
+    lastError: null, // Properti baru untuk menyimpan detail error terakhir
     
-    // Fungsi untuk memperbarui data dari JSON ke State
+    // --- Properti Dinamis ---
+    BOT_TOKEN: "",
+    API_URL: "",
+    ADMIN_ID: "",
+    STEX_EMAIL: "",
+    STEX_PASSWORD: "",
+    LOGIN_URL: "",
+    TARGET_URL: "",
+    GROUP_ID_1: "",
+    GROUP_LINK_1: "",
+
+    /**
+     * Fungsi Sinkronisasi Data
+     */
     reload: function() {
-        const conf = loadRawConfig();
-        
-        // Mapping langsung dari JSON ke Properti State
+        console.log("[STATE] Memulai sinkronisasi bot_config.json...");
+        const result = loadRawConfig();
+
+        if (result.error) {
+            this.lastError = result.error;
+            this.statusText = "Error Config";
+            console.error(`[STATE] ❌ KESALAHAN: ${result.error}`);
+            return false;
+        }
+
+        const conf = result.data;
+
+        // Validasi Key Utama
+        if (!conf.BOT_TOKEN_GETNUM) {
+            this.lastError = "Key 'BOT_TOKEN_GETNUM' tidak ditemukan di dalam JSON";
+            console.warn(`[STATE] ⚠️ Peringatan: ${this.lastError}`);
+            // Kita tidak return false di sini agar variabel lain tetap terisi jika ada
+        }
+
+        // Mapping Data
         this.BOT_TOKEN = conf.BOT_TOKEN_GETNUM || "";
         this.API_URL = this.BOT_TOKEN ? `https://api.telegram.org/bot${this.BOT_TOKEN}` : "";
-        
-        this.ADMIN_ID = conf.ADMIN_ID || "";
+        this.ADMIN_ID = String(conf.ADMIN_ID || "");
         this.STEX_EMAIL = conf.EMAIL || "";
         this.STEX_PASSWORD = conf.PASSWORD || "";
-        
         this.LOGIN_URL = conf.URL_LOGIN || "";
         this.TARGET_URL = conf.URL_TARGET_GETNUM || "";
-        
         this.GROUP_ID_1 = conf.GROUP_ID_1 || "";
         this.GROUP_LINK_1 = conf.URL_GRUP_OTP || "";
 
-        console.log("[STATE] Data sinkron dengan bot_config.json");
+        this.lastError = null; // Reset error jika berhasil
+        console.log(`[STATE] ✅ Sinkronisasi Berhasil. Token: ${this.BOT_TOKEN ? this.BOT_TOKEN.substring(0, 10) + "..." : "KOSONG"}`);
+        return true;
     },
 
-    // Nilai statis yang jarang berubah
+    // --- Pengaturan Harga & Antrean ---
     OTP_PRICE: 0.003500,
     
-    // Fitur Lock Playwright
     playwrightLock: {
         locked: false,
         acquire: async function() {
@@ -56,7 +101,7 @@ const state = {
     }
 };
 
-// Jalankan reload pertama kali saat script dimuat
+// Jalankan reload pertama kali
 state.reload();
 
 module.exports = { state, playwrightLock: state.playwrightLock };
