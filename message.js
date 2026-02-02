@@ -10,6 +10,19 @@ let monitorPage = null;
 const SMC_JSON_FILE = path.join(__dirname, "smc.json");
 const WAIT_JSON_FILE = path.join(__dirname, "wait.json");
 const CACHE_FILE = path.join(__dirname, 'otp_cache.json');
+const BOT_CONFIG_PATH = path.join(__dirname, 'bot_config.json');
+
+// --- Helper Baca JSON Langsung ---
+const getLiveConfig = () => {
+    try {
+        if (fs.existsSync(BOT_CONFIG_PATH)) {
+            return JSON.parse(fs.readFileSync(BOT_CONFIG_PATH, 'utf-8'));
+        }
+    } catch (e) {
+        console.error("❌ [MESSAGE] Gagal baca bot_config.json");
+    }
+    return {};
+};
 
 // --- Utils ---
 function escapeHtml(text) {
@@ -55,8 +68,14 @@ function extractOtp(text) {
 }
 
 async function sendTelegram(text, otpCode = null) {
+    // Ambil data terbaru dari JSON untuk pengiriman
+    const liveCfg = getLiveConfig();
+    const chatIdMessage = liveCfg.CHAT_ID_MESSAGE || config.CHAT_ID_MESSAGE;
+    const adminLink = liveCfg.URL_ADMIN || config.TELEGRAM_ADMIN_LINK;
+    const botLink = liveCfg.URL_GETNUM || config.BOT_USERNAME_LINK;
+
     const payload = {
-        chat_id: config.CHAT_ID_MESSAGE,
+        chat_id: chatIdMessage,
         text: text,
         parse_mode: 'HTML',
         disable_web_page_preview: true
@@ -67,9 +86,9 @@ async function sendTelegram(text, otpCode = null) {
             inline_keyboard: [
                 [
                     { text: ` ${otpCode}`, copy_text: { text: otpCode } }, 
-                    { text: "🎭 Owner", url: config.TELEGRAM_ADMIN_LINK }
+                    { text: "🎭 Owner", url: adminLink }
                 ],
-                [{ text: "📞 Get Number", url: config.BOT_USERNAME_LINK }]
+                [{ text: "📞 Get Number", url: botLink }]
             ]
         };
     }
@@ -99,6 +118,10 @@ async function start() {
                 return;
             }
 
+            // AMBIL URL TARGET MESSAGE DARI JSON SETIAP LOOP
+            const liveCfg = getLiveConfig();
+            const targetMessageUrl = liveCfg.URL_TARGET_MESSAGE || "https://stexsms.com/mdashboard/getnum";
+
             try {
                 if (!monitorPage || monitorPage.isClosed()) {
                     const contexts = state.browser.contexts();
@@ -106,13 +129,13 @@ async function start() {
                     monitorPage = await context.newPage();
                 }
 
-                if (!monitorPage.url().includes('/getnum')) {
-                    await monitorPage.goto(config.URL_TARGET_MESSAGE, { waitUntil: 'domcontentloaded' }).catch(() => {});
+                if (!monitorPage.url().includes(targetMessageUrl)) {
+                    await monitorPage.goto(targetMessageUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
                 }
 
                 const responsePromise = monitorPage.waitForResponse(r => r.url().includes("/getnum/info"), { timeout: 5000 }).catch(() => null);
                 
-                // Trigger refresh
+                // Trigger refresh dengan klik header tabel
                 await monitorPage.click('th:has-text("Number Info")', { timeout: 1000 }).catch(() => {});
                 
                 const response = await responsePromise;
@@ -183,4 +206,3 @@ function stop() {
 }
 
 module.exports = { start, stop };
-
