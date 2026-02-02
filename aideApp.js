@@ -3,7 +3,6 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const ngrok = require('ngrok'); 
 const config = require('./config');
 const db = require('./helpers/database');
 const { state } = require('./helpers/state');
@@ -17,8 +16,9 @@ app.use(bodyParser.json());
 const API_FILE = path.join(__dirname, 'api.json');
 const CONFIG_FILE = path.join(__dirname, 'bot_config.json');
 
-app.get('/', (req, res) => res.send("<h1>Zura Bot Ngrok Online</h1>"));
+app.get('/', (req, res) => res.send("<h1>Zura Bot API Server Online</h1><p>Gunakan URL Ngrok yang aktif di CMD.</p>"));
 
+// Middleware Cek API Key
 app.use((req, res, next) => {
     if (req.path === '/') return next();
     const clientKey = req.headers['authorization'] || req.body.api_key;
@@ -43,8 +43,9 @@ app.post('/save-config', (req, res) => {
 });
 
 app.get('/get-config', (req, res) => {
-    if (fs.existsSync(CONFIG_FILE)) res.json(JSON.parse(fs.readFileSync(CONFIG_FILE)));
-    else res.json({});
+    if (fs.existsSync(CONFIG_FILE)) {
+        try { res.json(JSON.parse(fs.readFileSync(CONFIG_FILE))); } catch(e) { res.json({}); }
+    } else { res.json({}); }
 });
 
 app.get('/dashboard', (req, res) => {
@@ -66,26 +67,14 @@ app.post('/action', async (req, res) => {
         if (action === 'stop') await main.stopBot();
         else if (action === 'start') await main.startBot();
         else if (action === 'refresh') await main.restartBot();
-        res.json({ status: true, message: "Action " + action + " executed" });
+        res.json({ status: true, message: "Action " + action + " success" });
     } catch (e) { res.status(500).json({ status: false, message: e.message }); }
 });
 
-async function startServer() {
-    app.listen(PORT, async () => {
-        console.log(`[API] Local Server running on port ${PORT}`);
-        try {
-            // Gunakan port langsung tanpa objek config tambahan
-            const url = await ngrok.connect(PORT);
-            
-            console.log("\n========================================");
-            console.log("🚀 NGROK TUNNEL BERHASIL AKTIF!");
-            console.log(`🔗 URL HP: ${url}`);
-            console.log("========================================");
-            console.log("Salin URL https di atas ke aplikasi HP kamu.\n");
-        } catch (err) {
-            console.error("[NGROK ERROR] Gagal menyambung. Pesan:", err.message);
-            console.log("Tips: Pastikan tidak ada proses ngrok lain yang sedang berjalan.");
-        }
+function startServer() {
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`[API] Server Dashboard internal aktif di port ${PORT}`);
+        console.log(`[TIPS] Jika port diblokir, jalankan 'ngrok http ${PORT}' di CMD terpisah.`);
     });
 }
 
