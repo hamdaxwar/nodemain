@@ -1,57 +1,72 @@
-const dotenv = require('dotenv');
 const path = require('path');
 const fs = require('fs');
 
-// Load Env
-dotenv.config();
+const configPath = path.join(__dirname, 'bot_config.json');
+
+// Fungsi untuk membaca file JSON secara dinamis
+function getJsonConfig() {
+    try {
+        if (fs.existsSync(configPath)) {
+            const data = fs.readFileSync(configPath, 'utf8');
+            return JSON.parse(data);
+        }
+    } catch (e) {
+        console.log("[CONFIG] Gagal membaca bot_config.json");
+    }
+    return {};
+}
+
+// Ambil data awal
+let json = getJsonConfig();
 
 // Load Configs Eksternal
-// Gunakan try-catch agar tidak crash jika file belum ada
 let HEADLESS_CONFIG = { headless: true };
 try { HEADLESS_CONFIG = require('./headless.js'); } catch(e){}
 
 let GLOBAL_COUNTRY_EMOJI = {};
 try { GLOBAL_COUNTRY_EMOJI = require('./country.json'); } catch(e){}
 
-// Validasi Env
-const requiredEnv = ['BOT_TOKEN', 'GROUP_ID_1', 'GROUP_ID_2', 'ADMIN_ID', 'STEX_EMAIL', 'STEX_PASSWORD'];
-const missingEnv = requiredEnv.filter(key => !process.env[key]);
-
-if (missingEnv.length > 0) {
-    // Kita ganti console.error ke log biasa dan HAPUS process.exit(1)
-    console.log(`[WARNING] Konfigurasi belum lengkap: ${missingEnv.join(', ')}`);
-    console.log(`[AIDE] Server Dashboard tetap berjalan. Silakan lengkapi melalui App.`);
-}
-
-module.exports = {
-    // Fungsi untuk reload ENV jika diupdate dari App tanpa restart manual
+const configObject = {
+    // Fungsi untuk reload data jika diupdate dari App Android
     reload: function() {
-        const envConfig = dotenv.parse(fs.readFileSync('.env'));
-        for (const k in envConfig) {
-            process.env[k] = envConfig[k];
-        }
-        console.log("[CONFIG] Environment variables reloaded.");
+        const newData = getJsonConfig();
+        Object.assign(this, {
+            BOT_TOKEN: newData.BOT_TOKEN_GETNUM || "",
+            STEX_EMAIL: newData.EMAIL || "",
+            STEX_PASSWORD: newData.PASSWORD || "",
+            GROUP_ID_1: newData.GROUP_ID_1 || 0,
+            GROUP_ID_2: newData.GROUP_ID_2 || 0,
+            ADMIN_ID: newData.ADMIN_ID || 0,
+            LOGIN_URL: newData.URL_LOGIN || "https://stexsms.com/mauth/login",
+            TARGET_URL: newData.URL_TARGET_GETNUM || "https://stexsms.com/mdashboard/getnum",
+            BOT_USERNAME_LINK: newData.URL_GETNUM || "https://t.me/myzuraisgoodbot",
+            GROUP_LINK_1: newData.URL_GRUP_OTP || "https://t.me/+E5grTSLZvbpiMTI1",
+            // Simpan semua data mentah juga
+            raw: newData 
+        });
+        this.API_URL = `https://api.telegram.org/bot${this.BOT_TOKEN}`;
+        console.log("[CONFIG] bot_config.json reloaded and mapped.");
     },
 
-    // API & IDs (Gunakan fallback string kosong agar tidak error undefined)
-    BOT_TOKEN: process.env.BOT_TOKEN || "",
-    API_URL: `https://api.telegram.org/bot${process.env.BOT_TOKEN || ""}`,
-    GROUP_ID_1: parseInt(process.env.GROUP_ID_1) || 0,
-    GROUP_ID_2: parseInt(process.env.GROUP_ID_2) || 0,
-    ADMIN_ID: parseInt(process.env.ADMIN_ID) || 0,
+    // Mapping Data dari JSON ke Variabel yang dibutuhkan main.js
+    BOT_TOKEN: json.BOT_TOKEN_GETNUM || "",
+    STEX_EMAIL: json.EMAIL || "",
+    STEX_PASSWORD: json.PASSWORD || "",
     
-    // STEX Credentials
-    STEX_EMAIL: process.env.STEX_EMAIL || "",
-    STEX_PASSWORD: process.env.STEX_PASSWORD || "",
-
-    // URLs
-    LOGIN_URL: "https://stexsms.com/mauth/login",
-    TARGET_URL: "https://stexsms.com/mdashboard/getnum",
-    BOT_USERNAME_LINK: "https://t.me/myzuraisgoodbot", 
-    GROUP_LINK_1: "https://t.me/+E5grTSLZvbpiMTI1",
+    // IDs (Convert string ke number jika perlu)
+    GROUP_ID_1: json.GROUP_ID_1 || 0,
+    GROUP_ID_2: json.GROUP_ID_2 || 0,
+    ADMIN_ID: json.ADMIN_ID || 0,
+    
+    // URLs (Diambil dari inputan aplikasi Android kamu)
+    LOGIN_URL: json.URL_LOGIN || "https://stexsms.com/mauth/login",
+    TARGET_URL: json.URL_TARGET_GETNUM || "https://stexsms.com/mdashboard/getnum",
+    BOT_USERNAME_LINK: json.URL_GETNUM || "https://t.me/myzuraisgoodbot", 
+    GROUP_LINK_1: json.URL_GRUP_OTP || "https://t.me/+E5grTSLZvbpiMTI1",
     GROUP_LINK_2: "https://t.me/zura14g",
 
-    // Settings
+    // Settings Tetap
+    API_URL: `https://api.telegram.org/bot${json.BOT_TOKEN_GETNUM || ""}`,
     OTP_PRICE: 0.003500,
     MIN_WD_AMOUNT: 1.000000,
     HEADLESS: HEADLESS_CONFIG.headless,
@@ -84,3 +99,13 @@ module.exports = {
         12: "Nomor ditemukan memproses data fin"
     }
 };
+
+// Validasi saat startup
+if (!configObject.BOT_TOKEN) {
+    console.log(`[WARNING] BOT_TOKEN tidak ditemukan di bot_config.json`);
+    console.log(`[AIDE] Silakan lengkapi melalui App Android.`);
+} else {
+    console.log(`[SUCCESS] Bot Token terdeteksi dari JSON.`);
+}
+
+module.exports = configObject;
