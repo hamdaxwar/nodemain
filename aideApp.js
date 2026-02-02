@@ -8,7 +8,12 @@ const db = require('./helpers/database');
 const { state } = require('./helpers/state');
 
 const app = express();
-const PORT = 3000;
+
+/**
+ * PORT diubah ke 80 karena Port 3000 diblokir oleh provider RDP Anda.
+ * Port 80 adalah standar HTTP yang biasanya terbuka secara default.
+ */
+const PORT = 80;
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -18,8 +23,8 @@ const CONFIG_FILE = path.join(__dirname, 'bot_config.json');
 
 // --- Middleware Cek API Key ---
 app.use((req, res, next) => {
-    // Skip cek untuk endpoint root atau health check jika perlu
-    if (req.path === '/') return res.send("Zura Bot API Server Running");
+    // Memberikan tampilan jika dibuka langsung di browser HP
+    if (req.path === '/') return res.send("<h1>Zura Bot API Server Running</h1><p>Status: Online (Port 80)</p>");
 
     const clientKey = req.headers['authorization'] || req.body.api_key;
     
@@ -46,7 +51,6 @@ app.post('/check-api', (req, res) => {
 // 2. Simpan Konfigurasi
 app.post('/save-config', (req, res) => {
     const newConfig = req.body;
-    // Validasi dasar
     if (!newConfig.BOT_TOKEN || !newConfig.EMAIL) {
         return res.status(400).json({ status: false, message: "Data config tidak lengkap" });
     }
@@ -59,10 +63,12 @@ app.post('/save-config', (req, res) => {
     }
 });
 
-// 3. Ambil Konfigurasi (Untuk ditampilkan di form edit app)
+// 3. Ambil Konfigurasi
 app.get('/get-config', (req, res) => {
     if (fs.existsSync(CONFIG_FILE)) {
-        res.json(JSON.parse(fs.readFileSync(CONFIG_FILE)));
+        try {
+            res.json(JSON.parse(fs.readFileSync(CONFIG_FILE)));
+        } catch(e) { res.json({}); }
     } else {
         res.json({});
     }
@@ -70,25 +76,26 @@ app.get('/get-config', (req, res) => {
 
 // 4. Dashboard Stats
 app.get('/dashboard', (req, res) => {
-    const stats = db.getDashboardStats();
+    // Pastikan fungsi ini ada di database helper Anda
+    const stats = (db.getDashboardStats) ? db.getDashboardStats() : { user_count: 0, total_otp: 0 };
     res.json({
         status: true,
         data: {
-            users: stats.user_count,
-            total_otp: stats.total_otp,
-            today_otp: stats.today_otp,
-            otp_fb: stats.otp_fb,
-            otp_wa: stats.otp_wa,
-            bot_status: state.isBotRunning ? "ONLINE" : "OFFLINE",
-            status_text: state.statusText
+            users: stats.user_count || 0,
+            total_otp: stats.total_otp || 0,
+            today_otp: stats.today_otp || 0,
+            otp_fb: stats.otp_fb || 0,
+            otp_wa: stats.otp_wa || 0,
+            bot_status: (state && state.isBotRunning) ? "ONLINE" : "OFFLINE",
+            status_text: (state && state.statusText) ? state.statusText : "Unknown"
         }
     });
 });
 
 // 5. Bot Actions (Start, Stop, Restart)
 app.post('/action', async (req, res) => {
-    const action = req.body.action; // 'start', 'stop', 'refresh'
-    const main = require('./main'); // Lazy load main to access exported functions
+    const action = req.body.action; 
+    const main = require('./main'); 
 
     try {
         if (action === 'stop') {
@@ -109,10 +116,13 @@ app.post('/action', async (req, res) => {
 });
 
 function startServer() {
-    app.listen(PORT, () => {
+    /**
+     * Penting: Menggunakan '0.0.0.0' agar server mendengarkan permintaan 
+     * dari luar jaringan (Internet), bukan hanya localhost.
+     */
+    app.listen(PORT, '0.0.0.0', () => {
         console.log(`[API] Aide App Server listening on port ${PORT}`);
     });
 }
 
 module.exports = { startServer };
-
