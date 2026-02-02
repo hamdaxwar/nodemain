@@ -6,7 +6,7 @@ const tg = require('../helpers/telegram');
 const { state } = require('../helpers/state');
 const scraper = require('../helpers/scraper');
 
-const BOT_CONFIG_PATH = path.join(__dirname, '../../bot_config.json');
+const BOT_CONFIG_PATH = path.join(__dirname, '../bot_config.json');
 
 /**
  * Helper untuk membaca konfigurasi dari JSON secara langsung (Live)
