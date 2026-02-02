@@ -88,17 +88,30 @@ async function sendTelegram(text, otpCode = null) {
     };
 
     if (otpCode) {
-        payload.reply_markup = {
-            inline_keyboard: [
-                [
-                    { text: `📋 Copy OTP: ${otpCode}`, callback_data: `copy_${otpCode}` }, 
-                    { text: "🎭 Owner", url: sessionConfig.adminUrl }
-                ],
-                [{ text: "📞 Get Number", url: sessionConfig.botLink }]
+    payload.reply_markup = {
+        inline_keyboard: [
+            [
+                {
+                    text: ` Copy OTP: ${otpCode}`,
+                    copy_text: {
+                        text: otpCode
+                    }
+                },
+                {
+                    text: "🎭 Owner",
+                    url: sessionConfig.adminUrl
+                }
+            ],
+            [
+                {
+                    text: "📞 Get Number",
+                    url: sessionConfig.botLink
+                }
             ]
-        };
+        ]
+    };
     }
-
+    
     try {
         await axios.post(`${API_URL_MESSAGE}/sendMessage`, payload);
     } catch (e) {
