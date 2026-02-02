@@ -16,172 +16,391 @@ const API_FILE = path.join(__dirname, 'api.json');
 const CONFIG_FILE = path.join(__dirname, 'bot_config.json');
 const USER_FILE = path.join(__dirname, 'user.json');
 const OTP_CACHE_FILE = path.join(__dirname, 'otp_cache.json');
+const SMC_FILE = path.join(__dirname, 'smc.json');
+const CACHE_FILE = path.join(__dirname, 'cache.json');
 const WAIT_FILE = path.join(__dirname, 'wait.json');
+
 const DASHBOARD_CACHE = path.join(__dirname, 'cache_dashboard.json');
 const DASHBOARD_FINAL = path.join(__dirname, 'dashboard.json');
 
-// Initialize Cache Dashboard
+// Initialize Dashboard Cache if not exists
 if (!fs.existsSync(DASHBOARD_CACHE)) {
-    fs.writeFileSync(DASHBOARD_CACHE, JSON.stringify([], null, 2));
+    fs.writeFileSync(DASHBOARD_CACHE, JSON.stringify({
+        today_otp: 0,
+        week_otp: 0,
+        otp_fb: 0,
+        otp_wa: 0,
+        getnum: 0,
+        jumlah_user: 0,
+        processed: [] // untuk menghindari duplikat
+    }, null, 2));
 }
 
-// --- FUNGSI HELPER ---
-
-function getFileData(filePath, defaultValue = []) {
+// --- HELPERS ---
+function readJson(filePath, defaultValue) {
     try {
         if (!fs.existsSync(filePath)) return defaultValue;
         return JSON.parse(fs.readFileSync(filePath));
-    } catch (e) { return defaultValue; }
+    } catch (e) {
+        return defaultValue;
+    }
 }
 
-function saveFileData(filePath, data) {
+function writeJson(filePath, data) {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
 }
 
-// --- LOGIKA PEMROSESAN DATA ---
+function uniqueKey(obj) {
+    // key untuk cek duplikat sesuai "cek" nya
+    const cek = obj.cek;
+    if (cek === "otp_harian" || cek === "otp_mingguan") {
+        return `${cek}_${obj.Number}_${obj.Otp}`;
+    }
+    if (cek === "WhatsApp" || cek === "Facebook") {
+        return `${cek}_${obj.Number}_${obj.Service}`;
+    }
+    if (cek === "getnum") {
+        return `${cek}_${obj.Number}`;
+    }
+    if (cek === "jumlah_user") {
+        return `${cek}_${obj.id_user}`;
+    }
+    return JSON.stringify(obj);
+}
 
-function processDashboardData() {
+// --- LOGIKA UPDATE DASHBOARD.JSON ---
+function updateFinalDashboard(status = "stopped") {
     try {
-        let cacheDash = getFileData(DASHBOARD_CACHE);
-        let otpData = getFileData(OTP_CACHE_FILE);
-        let userData = getFileData(USER_FILE);
-        let waitData = getFileData(WAIT_FILE);
-        
+        const dashCache = readJson(DASHBOARD_CACHE, {
+            today_otp: 0,
+            week_otp: 0,
+            otp_fb: 0,
+            otp_wa: 0,
+            getnum: 0,
+            jumlah_user: 0,
+            processed: []
+        });
+
+        const users = readJson(USER_FILE, []).length;
+        const finalData = {
+            data: {
+                users: users.toString(),
+                today_otp: dashCache.today_otp.toString(),
+                week_otp: dashCache.week_otp.toString(),
+                otp_fb: dashCache.otp_fb.toString(),
+                otp_wa: dashCache.otp_wa.toString(),
+                GetNum: dashCache.getnum.toString(),
+                bot_status: status
+            }
+        };
+
+        writeJson(DASHBOARD_FINAL, finalData);
+    } catch (e) {
+        console.log("[Error Update Dashboard]", e.message);
+    }
+}
+
+// --- LOGIKA PEMBACA OTP CACHE ---
+function processOtpCache() {
+    try {
+        const otpCache = readJson(OTP_CACHE_FILE, []);
+        let dash = readJson(DASHBOARD_CACHE, {
+            today_otp: 0,
+            week_otp: 0,
+            otp_fb: 0,
+            otp_wa: 0,
+            getnum: 0,
+            jumlah_user: 0,
+            processed: []
+        });
+
         let changed = false;
 
-        // 1. Proses Users (Abadi)
-        userData.forEach(user => {
-            const userId = user.id || user; // Sesuaikan dengan struktur user.json kamu
-            const exists = cacheDash.find(c => c.cek === "jumlah_user" && c.id === userId);
-            if (!exists) {
-                cacheDash.push({ cek: "jumlah_user", id: userId });
-                changed = true;
-            }
-        });
+        otpCache.forEach(item => {
+            const service = (item.Service || "").toLowerCase();
+            const now = new Date();
+            const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+            const startOfWeek = startOfDay - (7 * 24 * 60 * 60 * 1000);
 
-        // 2. Proses GetNum dari wait.json
-        waitData.forEach(item => {
-            const exists = cacheDash.find(c => c.cek === "getnum" && c.Number === item.Number);
-            if (!exists) {
-                cacheDash.push({ cek: "getnum", Number: item.Number });
-                changed = true;
-            }
-        });
-
-        // 3. Proses OTP (WhatsApp, Facebook, Harian, Mingguan) dari otp_cache.json
-        otpData.forEach(item => {
-            const uniqueOtpId = `${item.Number}_${item.Otp}`;
-            const serviceType = (item.Service || "").toLowerCase();
-            let label = "";
-
-            if (serviceType.includes('whatsapp')) label = "WhatsApp";
-            else if (serviceType.includes('facebook')) label = "Facebook";
-            else label = "Lainnya";
-
-            const exists = cacheDash.find(c => c.cek === label && c.uniqueId === uniqueOtpId);
-            
-            if (!exists) {
-                // Simpan ke cache berdasarkan kategori
-                cacheDash.push({ 
-                    cek: label, 
-                    uniqueId: uniqueOtpId, 
+            // OTP HARIAN
+            if (item.t && new Date(item.t).getTime() >= startOfDay) {
+                const obj = {
+                    cek: "otp_harian",
                     Number: item.Number,
-                    timestamp: item.t 
-                });
-                
-                // Juga simpan sebagai record harian/mingguan untuk filter reset
-                cacheDash.push({ 
-                    cek: "otp_entry", 
-                    uniqueId: uniqueOtpId, 
-                    timestamp: item.t 
-                });
-                
+                    Otp: item.Otp
+                };
+                const key = uniqueKey(obj);
+                if (!dash.processed.includes(key)) {
+                    dash.today_otp++;
+                    dash.processed.push(key);
+                    changed = true;
+                }
+            }
+
+            // OTP MINGGUAN
+            if (item.t && new Date(item.t).getTime() >= startOfWeek) {
+                const obj = {
+                    cek: "otp_mingguan",
+                    Number: item.Number,
+                    Otp: item.Otp
+                };
+                const key = uniqueKey(obj);
+                if (!dash.processed.includes(key)) {
+                    dash.week_otp++;
+                    dash.processed.push(key);
+                    changed = true;
+                }
+            }
+
+            // OTP WHATSAPP
+            if (service.includes("whatsapp")) {
+                const obj = {
+                    cek: "WhatsApp",
+                    Number: item.Number,
+                    Service: "WhatsApp"
+                };
+                const key = uniqueKey(obj);
+                if (!dash.processed.includes(key)) {
+                    dash.otp_wa++;
+                    dash.processed.push(key);
+                    changed = true;
+                }
+            }
+
+            // OTP FACEBOOK
+            if (service.includes("facebook")) {
+                const obj = {
+                    cek: "Facebook",
+                    Number: item.Number,
+                    Service: "Facebook"
+                };
+                const key = uniqueKey(obj);
+                if (!dash.processed.includes(key)) {
+                    dash.otp_fb++;
+                    dash.processed.push(key);
+                    changed = true;
+                }
+            }
+        });
+
+        // Batasi array agar tidak bengkak (simpan 5000 ID terakhir saja)
+        if (dash.processed.length > 5000) {
+            dash.processed = dash.processed.slice(dash.processed.length - 5000);
+        }
+
+        if (changed) {
+            writeJson(DASHBOARD_CACHE, dash);
+            updateFinalDashboard();
+        }
+    } catch (e) {
+        console.log("[Error Process OTP Cache]", e.message);
+    }
+}
+
+// --- LOGIKA GETNUM dari wait.json ---
+function processWait() {
+    try {
+        const wait = readJson(WAIT_FILE, []);
+        let dash = readJson(DASHBOARD_CACHE, {
+            today_otp: 0,
+            week_otp: 0,
+            otp_fb: 0,
+            otp_wa: 0,
+            getnum: 0,
+            jumlah_user: 0,
+            processed: []
+        });
+
+        let changed = false;
+
+        wait.forEach(item => {
+            if (!item.Number) return;
+
+            const obj = {
+                cek: "getnum",
+                Number: item.Number
+            };
+            const key = uniqueKey(obj);
+            if (!dash.processed.includes(key)) {
+                dash.getnum++;
+                dash.processed.push(key);
                 changed = true;
             }
         });
 
         if (changed) {
-            saveFileData(DASHBOARD_CACHE, cacheDash);
+            writeJson(DASHBOARD_CACHE, dash);
             updateFinalDashboard();
         }
-    } catch (e) { console.log("[Error Processing]", e.message); }
+    } catch (e) {
+        console.log("[Error Process Wait]", e.message);
+    }
 }
 
-function updateFinalDashboard() {
-    const cacheDash = getFileData(DASHBOARD_CACHE);
-    
-    // Hitung counts berdasarkan label "cek"
-    const finalData = {
-        data: {
-            users: cacheDash.filter(c => c.cek === "jumlah_user").length.toString(),
-            today_otp: cacheDash.filter(c => c.cek === "otp_harian_active").length.toString(),
-            week_otp: cacheDash.filter(c => c.cek === "otp_mingguan_active").length.toString(),
-            otp_fb: cacheDash.filter(c => c.cek === "Facebook").length.toString(),
-            otp_wa: cacheDash.filter(c => c.cek === "WhatsApp").length.toString(),
-            GetNum: cacheDash.filter(c => c.cek === "getnum").length.toString()
+// --- LOGIKA JUMLAH USER dari user.json ---
+function processUser() {
+    try {
+        const users = readJson(USER_FILE, []);
+        let dash = readJson(DASHBOARD_CACHE, {
+            today_otp: 0,
+            week_otp: 0,
+            otp_fb: 0,
+            otp_wa: 0,
+            getnum: 0,
+            jumlah_user: 0,
+            processed: []
+        });
+
+        let changed = false;
+
+        users.forEach(u => {
+            if (!u.id_user) return;
+
+            const obj = {
+                cek: "jumlah_user",
+                id_user: u.id_user
+            };
+            const key = uniqueKey(obj);
+            if (!dash.processed.includes(key)) {
+                dash.jumlah_user++;
+                dash.processed.push(key);
+                changed = true;
+            }
+        });
+
+        if (changed) {
+            writeJson(DASHBOARD_CACHE, dash);
+            updateFinalDashboard();
         }
-    };
-
-    // Logika tambahan: otp_harian_active & mingguan diambil dari filter timestamp
-    // Namun untuk performa, kita gunakan filter cek saja di sini.
-    
-    saveFileData(DASHBOARD_FINAL, finalData);
+    } catch (e) {
+        console.log("[Error Process User]", e.message);
+    }
 }
 
-// Watcher untuk update data realtime
-setInterval(processDashboardData, 1000);
-
-// --- CRON JOBS ---
-
-// 1. Reset Harian (Jam 7 Pagi) - Hanya reset hariannya saja
+// --- CRON JOB RESET ---
 cron.schedule('0 7 * * *', () => {
-    console.log("[Reset] Reset OTP Harian...");
-    let cacheDash = getFileData(DASHBOARD_CACHE);
-    // Hapus data dengan cek 'otp_harian_active'
-    cacheDash = cacheDash.filter(c => c.cek !== "otp_harian_active");
-    
-    // Ambil data baru dari otp_entry yang timestamp-nya hari ini (setelah jam 7)
-    // Untuk mempermudah, kita tandai saja yang baru masuk setelah jam 7 sebagai active
-    saveFileData(DASHBOARD_CACHE, cacheDash);
+    console.log("[Reset Harian] jam 7 pagi WIB...");
+    let dash = readJson(DASHBOARD_CACHE, {
+        today_otp: 0,
+        week_otp: 0,
+        otp_fb: 0,
+        otp_wa: 0,
+        getnum: 0,
+        jumlah_user: 0,
+        processed: []
+    });
+
+    // Reset harian
+    dash.today_otp = 0;
+
+    // Hanya hapus processed yang berkaitan dengan otp_harian
+    dash.processed = dash.processed.filter(k => !k.startsWith("otp_harian_"));
+
+    writeJson(DASHBOARD_CACHE, dash);
     updateFinalDashboard();
 }, { timezone: "Asia/Jakarta" });
 
-// 2. Reset Mingguan (Setiap Senin Jam 7 Pagi)
-cron.schedule('0 7 * * 1', () => {
-    console.log("[Reset] Reset Mingguan & Sosmed...");
-    let cacheDash = getFileData(DASHBOARD_CACHE);
-    
-    // Reset WhatsApp, Facebook, dan Mingguan
-    const filtered = cacheDash.filter(c => 
-        c.cek !== "WhatsApp" && 
-        c.cek !== "Facebook" && 
-        c.cek !== "otp_mingguan_active"
-    );
-    
-    saveFileData(DASHBOARD_CACHE, filtered);
+// Reset mingguan (setiap 7 hari sekali)
+cron.schedule('0 7 * * 0', () => {
+    console.log("[Reset Mingguan] Minggu jam 7 pagi WIB...");
+    let dash = readJson(DASHBOARD_CACHE, {
+        today_otp: 0,
+        week_otp: 0,
+        otp_fb: 0,
+        otp_wa: 0,
+        getnum: 0,
+        jumlah_user: 0,
+        processed: []
+    });
+
+    dash.week_otp = 0;
+    dash.otp_fb = 0;
+    dash.otp_wa = 0;
+
+    dash.processed = dash.processed.filter(k => {
+        return !k.startsWith("otp_mingguan_") &&
+               !k.startsWith("WhatsApp_") &&
+               !k.startsWith("Facebook_");
+    });
+
+    writeJson(DASHBOARD_CACHE, dash);
     updateFinalDashboard();
 }, { timezone: "Asia/Jakarta" });
 
+// --- RUN PROCESS PERIODIC ---
+setInterval(processOtpCache, 500);
+setInterval(processWait, 1000);
+setInterval(processUser, 5000);
 
-// --- API ENDPOINTS ---
-
+// --- AUTH MIDDLEWARE ---
 app.use((req, res, next) => {
-    if (req.path === '/' || req.path === '/dashboard') return next();
+    if (req.path === '/') return next();
     const clientKey = req.headers['authorization'];
-    const serverKey = getFileData(API_FILE, {API: ""}).API;
-    if (!clientKey || clientKey !== serverKey) return res.status(401).json({ status: false });
+    let serverKey = "";
+    if (fs.existsSync(API_FILE)) {
+        try { serverKey = JSON.parse(fs.readFileSync(API_FILE)).API; } catch (e) {}
+    }
+    if (!clientKey || clientKey !== serverKey) {
+        return res.status(401).json({ status: false });
+    }
     next();
 });
 
+// --- API ENDPOINTS ---
 app.get('/dashboard', (req, res) => {
-    const data = getFileData(DASHBOARD_FINAL, { data: { users: "0", today_otp: "0", week_otp: "0", otp_fb: "0", otp_wa: "0", GetNum: "0" } });
+    if (fs.existsSync(DASHBOARD_FINAL)) {
+        res.json(JSON.parse(fs.readFileSync(DASHBOARD_FINAL)));
+    } else {
+        updateFinalDashboard();
+        res.json({ data: { users: "0", today_otp: "0", week_otp: "0", otp_fb: "0", otp_wa: "0", GetNum: "0", bot_status: "stopped" } });
+    }
+});
+
+app.post('/check-api', (req, res) => res.json({ status: true }));
+
+app.post('/save-config', (req, res) => {
+    writeJson(CONFIG_FILE, req.body);
+    res.json({ status: true });
+});
+
+app.get('/get-config', (req, res) => {
+    const data = readJson(CONFIG_FILE, {});
     res.json(data);
 });
 
-// ... Endpoint lainnya tetap sama ...
-app.post('/check-api', (req, res) => res.json({ status: true }));
+app.post('/action', async (req, res) => {
+    const { action } = req.body;
+    const main = require('./main');
+
+    try {
+        if (action === 'stop') {
+            await main.stopBot();
+            updateFinalDashboard("stopped");
+        }
+        else if (action === 'start') {
+            await main.startBot();
+            updateFinalDashboard("running");
+        }
+        else if (action === 'refresh') {
+            await main.restartBot();
+            updateFinalDashboard("restarting");
+        }
+
+        res.json({ status: true });
+    } catch (e) {
+        res.status(500).json({ status: false });
+    }
+});
+
+// --- /dataref endpoint ---
+app.get('/dataref', (req, res) => {
+    updateFinalDashboard();
+    const dashboard = readJson(DASHBOARD_FINAL, { data: {} });
+    const config = readJson(CONFIG_FILE, {});
+    res.json({ status: true, dashboard, config });
+});
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[API] Dashboard Server Running on Port ${PORT}`);
-    processDashboardData(); 
+    console.log(`[API] Server Running on Port ${PORT}`);
+    updateFinalDashboard("stopped");
 });
