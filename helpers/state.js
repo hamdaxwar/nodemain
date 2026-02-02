@@ -1,95 +1,61 @@
 const fs = require('fs');
 const path = require('path');
 
-// Menggunakan process.cwd() agar path selalu merujuk ke folder root aplikasi
 const CONFIG_FILE = path.join(process.cwd(), 'bot_config.json');
 
-/**
- * Fungsi internal untuk memuat config dengan pelacakan error
- */
 function loadRawConfig() {
-    const result = { data: {}, error: null };
     try {
-        if (!fs.existsSync(CONFIG_FILE)) {
-            result.error = `File tidak ditemukan di path: ${CONFIG_FILE}`;
-            return result;
+        if (fs.existsSync(CONFIG_FILE)) {
+            return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
         }
-
-        const rawData = fs.readFileSync(CONFIG_FILE, 'utf8');
-        if (!rawData || rawData.trim() === "") {
-            result.error = "File bot_config.json kosong!";
-            return result;
-        }
-
-        result.data = JSON.parse(rawData);
     } catch (e) {
-        if (e instanceof SyntaxError) {
-            result.error = `Format JSON rusak: ${e.message}`;
-        } else {
-            result.error = `Gagal membaca file: ${e.message}`;
-        }
+        console.error("[STATE] Error reading JSON:", e.message);
     }
-    return result;
+    return {};
 }
 
 const state = {
     // --- Status Bot ---
     isBotRunning: false,
     statusText: "Idle",
-    lastError: null, // Properti baru untuk menyimpan detail error terakhir
+    browser: null,
     
-    // --- Properti Dinamis ---
-    BOT_TOKEN: "",
-    API_URL: "",
-    ADMIN_ID: "",
-    STEX_EMAIL: "",
-    STEX_PASSWORD: "",
-    LOGIN_URL: "",
-    TARGET_URL: "",
-    GROUP_ID_1: "",
-    GROUP_LINK_1: "",
+    // --- State Logic (WAJIB ADA UNTUK COMMANDS.JS) ---
+    verifiedUsers: new Set(),
+    manualRangeInput: new Set(),
+    waitingDanaInput: new Set(),
+    pendingMessage: {},
+    lastUsedRange: {},
 
-    /**
-     * Fungsi Sinkronisasi Data
-     */
     reload: function() {
-        console.log("[STATE] Memulai sinkronisasi bot_config.json...");
-        const result = loadRawConfig();
-
-        if (result.error) {
-            this.lastError = result.error;
-            this.statusText = "Error Config";
-            console.error(`[STATE] ❌ KESALAHAN: ${result.error}`);
-            return false;
-        }
-
-        const conf = result.data;
-
-        // Validasi Key Utama
-        if (!conf.BOT_TOKEN_GETNUM) {
-            this.lastError = "Key 'BOT_TOKEN_GETNUM' tidak ditemukan di dalam JSON";
-            console.warn(`[STATE] ⚠️ Peringatan: ${this.lastError}`);
-            // Kita tidak return false di sini agar variabel lain tetap terisi jika ada
-        }
-
-        // Mapping Data
+        const conf = loadRawConfig();
+        
         this.BOT_TOKEN = conf.BOT_TOKEN_GETNUM || "";
         this.API_URL = this.BOT_TOKEN ? `https://api.telegram.org/bot${this.BOT_TOKEN}` : "";
+        
         this.ADMIN_ID = String(conf.ADMIN_ID || "");
         this.STEX_EMAIL = conf.EMAIL || "";
         this.STEX_PASSWORD = conf.PASSWORD || "";
+        
         this.LOGIN_URL = conf.URL_LOGIN || "";
         this.TARGET_URL = conf.URL_TARGET_GETNUM || "";
+        this.URL_TARGET_RANGE = conf.URL_TARGET_RANGE || "";
+        this.URL_TARGET_MESSAGE = conf.URL_TARGET_MESSAGE || "";
+        
         this.GROUP_ID_1 = conf.GROUP_ID_1 || "";
         this.GROUP_LINK_1 = conf.URL_GRUP_OTP || "";
 
-        this.lastError = null; // Reset error jika berhasil
-        console.log(`[STATE] ✅ Sinkronisasi Berhasil. Token: ${this.BOT_TOKEN ? this.BOT_TOKEN.substring(0, 10) + "..." : "KOSONG"}`);
-        return true;
+        console.log("[STATE] Data sinkron dengan bot_config.json");
     },
 
-    // --- Pengaturan Harga & Antrean ---
+    // --- Config Statis ---
     OTP_PRICE: 0.003500,
+    FILES: {
+        USER: "user.json",
+        PROFILE: "profile.json",
+        WAIT: "wait.json",
+        SMC: "smc.json"
+    },
     
     playwrightLock: {
         locked: false,
