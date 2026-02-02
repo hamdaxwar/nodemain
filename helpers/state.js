@@ -4,6 +4,9 @@ const path = require('path');
 // Lokasi bot_config.json di root folder
 const CONFIG_FILE = path.join(process.cwd(), 'bot_config.json');
 
+/**
+ * Fungsi internal untuk membaca file JSON dari disk
+ */
 function loadRawConfig() {
     try {
         if (fs.existsSync(CONFIG_FILE)) {
@@ -16,7 +19,7 @@ function loadRawConfig() {
     return {};
 }
 
-// Inisialisasi variabel Set/Object di luar agar tidak terhapus saat reload
+// Inisialisasi variabel Set di luar agar tidak ter-reset saat reload() dipanggil
 const _verifiedUsers = new Set();
 const _manualRangeInput = new Set();
 const _waitingDanaInput = new Set();
@@ -25,7 +28,7 @@ const _waitingBroadcastInput = new Set();
 const _get10RangeInput = new Set();
 
 const state = {
-    // Properti Set (Getter agar selalu valid)
+    // --- Properti Set (Getter agar tetap konsisten di seluruh modul) ---
     get verifiedUsers() { return _verifiedUsers; },
     get manualRangeInput() { return _manualRangeInput; },
     get waitingDanaInput() { return _waitingDanaInput; },
@@ -33,54 +36,85 @@ const state = {
     get waitingBroadcastInput() { return _waitingBroadcastInput; },
     get get10RangeInput() { return _get10RangeInput; },
 
-    // Properti Objek Pendukung
+    // --- Objek Pendukung Sesi Chat ---
     pendingMessage: {},
     broadcastMessage: {},
     lastUsedRange: {},
 
-    // Status Bot
+    // --- Status Operasional (Memory Sesi) ---
     isBotRunning: false,
     statusText: "Idle",
     browser: null,
-    sharedPage: null, // Tambahkan ini jika scraper membutuhkannya
+    sharedPage: null, // Digunakan oleh modul GetNum (Main)
     
-    // Properti dari JSON
-    BOT_TOKEN: "",
-    API_URL: "",
+    // --- VARIABEL DINAMIS (INGATAN DARI JSON) ---
+    // Token Bot
+    BOT_TOKEN: "",         // Token GetNum (Script Utama)
+    BOT_TOKEN_RANGE: "",   // Token khusus untuk Bot Range
+    BOT_TOKEN_MESSAGE: "", // Token khusus untuk Bot Message (OTP)
+    API_URL: "",           // URL API Telegram untuk Bot Utama
+
+    // Identitas & Link
     ADMIN_ID: "",
+    URL_ADMIN: "",
+    URL_GETNUM: "",
+    URL_GRUP_OTP: "",
+
+    // Akun Stex & Login
     STEX_EMAIL: "",
     STEX_PASSWORD: "",
     LOGIN_URL: "",
-    TARGET_URL: "",
-    URL_TARGET_RANGE: "",
-    URL_TARGET_MESSAGE: "",
+
+    // Target Navigasi (Browser URLs)
+    TARGET_URL: "",          // URL Dashboard GetNum
+    URL_TARGET_RANGE: "",    // URL Dashboard Console
+    URL_TARGET_MESSAGE: "",  // URL Dashboard Info/OTP
+
+    // Chat IDs (Tujuan Pengiriman)
+    CHAT_ID_MESSAGE: "",
+    CHAT_ID_RANGE: "",
     GROUP_ID_1: "",
-    GROUP_LINK_1: "",
+    GROUP_ID_2: "",
 
     /**
-     * Memperbarui data dari file JSON
+     * Sinkronisasi Ulang Ingatan Sesi
+     * Mengambil data terbaru dari bot_config.json ke dalam RAM
      */
     reload: function() {
         const conf = loadRawConfig();
         
+        // Pemetaan Token
         this.BOT_TOKEN = conf.BOT_TOKEN_GETNUM || "";
+        this.BOT_TOKEN_RANGE = conf.BOT_TOKEN_RANGE || "";
+        this.BOT_TOKEN_MESSAGE = conf.BOT_TOKEN_MESSAGE || "";
         this.API_URL = this.BOT_TOKEN ? `https://api.telegram.org/bot${this.BOT_TOKEN}` : "";
         
+        // Pemetaan Admin & Link Telegram
         this.ADMIN_ID = String(conf.ADMIN_ID || "");
+        this.URL_ADMIN = conf.URL_ADMIN || "";
+        this.URL_GETNUM = conf.URL_GETNUM || "";
+        this.URL_GRUP_OTP = conf.URL_GRUP_OTP || "";
+        
+        // Pemetaan Kredensial Stex
         this.STEX_EMAIL = conf.EMAIL || "";
         this.STEX_PASSWORD = conf.PASSWORD || "";
-        
         this.LOGIN_URL = conf.URL_LOGIN || "";
+        
+        // Pemetaan URL Target Dashboard (Untuk Scraper)
         this.TARGET_URL = conf.URL_TARGET_GETNUM || "";
         this.URL_TARGET_RANGE = conf.URL_TARGET_RANGE || "";
         this.URL_TARGET_MESSAGE = conf.URL_TARGET_MESSAGE || "";
         
+        // Pemetaan Grup & Chat IDs
+        this.CHAT_ID_MESSAGE = conf.CHAT_ID_MESSAGE || "";
+        this.CHAT_ID_RANGE = conf.CHAT_ID_RANGE || "";
         this.GROUP_ID_1 = conf.GROUP_ID_1 || "";
-        this.GROUP_LINK_1 = conf.URL_GRUP_OTP || "";
+        this.GROUP_ID_2 = conf.GROUP_ID_2 || "";
 
-        console.log("[STATE] Sinkronisasi bot_config.json Berhasil.");
+        console.log("[STATE] Ingatan Sesi Berhasil Disinkronkan.");
     },
 
+    // Konfigurasi Tambahan
     OTP_PRICE: 0.003500,
     FILES: {
         USER: "user.json",
@@ -89,7 +123,7 @@ const state = {
         SMC: "smc.json"
     },
     
-    // LOCK SYSTEM UNTUK PLAYWRIGHT (Lengkap dengan isLocked)
+    // --- SISTEM PENGUNCI (LOCK) PLAYWRIGHT ---
     playwrightLock: {
         locked: false,
         isLocked: function() {
@@ -105,7 +139,7 @@ const state = {
     }
 };
 
-// Panggil reload pertama kali
+// Panggil reload pertama kali saat bot pertama kali dijalankan
 state.reload();
 
 module.exports = { 
