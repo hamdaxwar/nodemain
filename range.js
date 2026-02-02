@@ -11,8 +11,20 @@ let MESSAGE_QUEUE = [];
 let IS_PROCESSING_QUEUE = false; 
 
 const INLINE_JSON_PATH = path.join(__dirname, 'inline.json');
+const BOT_CONFIG_PATH = path.join(__dirname, 'bot_config.json');
 
-// --- Helpers ---
+// --- Helper Baca JSON Langsung ---
+const getLiveConfig = () => {
+    try {
+        if (fs.existsSync(BOT_CONFIG_PATH)) {
+            return JSON.parse(fs.readFileSync(BOT_CONFIG_PATH, 'utf-8'));
+        }
+    } catch (e) {
+        console.error("❌ [RANGE] Gagal baca bot_config.json");
+    }
+    return {};
+};
+
 const getCountryEmoji = (countryName) => config.COUNTRY_EMOJI[countryName.toUpperCase()] || "🏴‍☠️";
 
 const cleanPhoneNumber = (phone) => {
@@ -32,24 +44,29 @@ async function processQueue() {
     if (IS_PROCESSING_QUEUE || MESSAGE_QUEUE.length === 0) return;
     IS_PROCESSING_QUEUE = true;
 
+    // Ambil data terbaru dari JSON untuk pengiriman
+    const liveCfg = getLiveConfig();
+    const chatIdRange = liveCfg.CHAT_ID_RANGE || config.CHAT_ID_RANGE;
+    const botLink = liveCfg.URL_GETNUM || config.BOT_USERNAME_LINK;
+
     while (MESSAGE_QUEUE.length > 0) {
         const item = MESSAGE_QUEUE.shift();
         try {
             if (SENT_MESSAGES.has(item.rangeVal)) {
                 const oldMid = SENT_MESSAGES.get(item.rangeVal).message_id;
                 await axios.post(`${config.API_URL}/deleteMessage`, {
-                    chat_id: config.CHAT_ID_RANGE, 
+                    chat_id: chatIdRange, 
                     message_id: oldMid
                 }).catch(() => {});
                 await new Promise(r => setTimeout(r, 500));
             }
 
             const res = await axios.post(`${config.API_URL}/sendMessage`, {
-                chat_id: config.CHAT_ID_RANGE,
+                chat_id: chatIdRange,
                 text: item.text,
                 parse_mode: 'HTML',
                 reply_markup: { 
-                    inline_keyboard: [[{ text: "📞GetNumber", url: config.BOT_USERNAME_LINK }]] 
+                    inline_keyboard: [[{ text: "📞GetNumber", url: botLink }]] 
                 }
             });
 
@@ -60,7 +77,7 @@ async function processQueue() {
                     timestamp: Date.now()
                 });
                 saveToInlineJson(item.rangeVal, item.country, item.service);
-                console.log(`✅ [RANGE] Terkirim: ${item.rangeVal}`);
+                console.log(`✅ [RANGE] Terkirim ke ${chatIdRange}: ${item.rangeVal}`);
             }
         } catch (e) {
             if (e.response && e.response.status === 429) {
@@ -132,6 +149,10 @@ async function start() {
                 return;
             }
 
+            // AMBIL URL TARGET RANGE DARI JSON SETIAP LOOP
+            const liveCfg = getLiveConfig();
+            const targetUrl = liveCfg.URL_TARGET_RANGE || "https://stexsms.com/mdashboard/console";
+
             try {
                 if (!monitorPage || monitorPage.isClosed()) {
                     const contexts = state.browser.contexts();
@@ -139,8 +160,10 @@ async function start() {
                     monitorPage = await context.newPage();
                 }
 
-                if (!monitorPage.url().includes('/console')) {
-                    await monitorPage.goto(config.URL_TARGET_RANGE, { waitUntil: 'domcontentloaded' }).catch(() => {});
+                // Cek apakah URL sekarang sudah sesuai target
+                if (!monitorPage.url().includes(targetUrl)) {
+                    console.log(`[RANGE] Navigasi ke: ${targetUrl}`);
+                    await monitorPage.goto(targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
                 }
 
                 const CONSOLE_SELECTOR = ".group.flex.flex-col.sm\\:flex-row.sm\\:items-start.gap-3.p-3.rounded-lg";
@@ -206,4 +229,3 @@ function stop() {
 }
 
 module.exports = { start, stop };
-
