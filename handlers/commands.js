@@ -41,8 +41,7 @@ async function processCommand(msg) {
     const adminUrl = liveCfg.URL_ADMIN || "https://t.me/Imr1d";
     const groupLink1 = liveCfg.URL_GRUP_OTP || config.GROUP_LINK_1;
 
-    // 2. Deteksi Format Range Manual (Regex: Angka diikuti X/x/*/ atau #)
-    // Contoh: 225071606XXX atau +62812XXX
+    // 2. Deteksi Format Range Manual
     const rangePattern = /^\+?\d{3,15}[Xx*#]+$/;
     const isManualRange = rangePattern.test(text);
 
@@ -50,7 +49,7 @@ async function processCommand(msg) {
     if (String(userId) === adminIdFromConfig) {
         if (text.startsWith("/add")) {
             state.waitingAdminInput.add(userId);
-            const prompt = "Silahkan kirim daftar range dalam format:\n\n<code>range > country > service</code>\n\nContoh:\n<code>23273XXX > SIERRA LEONE > WA</code>";
+            const prompt = "Silahkan kirim daftar range dalam format:\n<code>range > country > service</code>";
             const mid = await tg.tgSend(userId, prompt);
             if (mid) state.pendingMessage[userId] = mid;
             return;
@@ -59,12 +58,6 @@ async function processCommand(msg) {
             state.waitingBroadcastInput.add(userId);
             const mid = await tg.tgSend(userId, "<b>Pesan Siaran</b>\n\nKirim pesan yang ingin disiarkan.");
             if (mid) state.broadcastMessage[userId] = mid;
-            return;
-        } 
-        else if (text.startsWith("/get10akses ")) {
-            const targetId = text.split(" ")[1];
-            db.saveAksesGet10(targetId);
-            await tg.tgSend(userId, `✅ User <code>${targetId}</code> berhasil diberi akses /get10.`);
             return;
         } 
         else if (text === "/list") {
@@ -77,7 +70,7 @@ async function processCommand(msg) {
     if (text === "/get10") {
         if (db.hasGet10Access(userId)) {
             state.get10RangeInput.add(userId);
-            const mid = await tg.tgSend(userId, "Kirim range untuk 10 nomor sekaligus\nContoh: <code>225071606XXX</code>");
+            const mid = await tg.tgSend(userId, "Kirim range untuk 10 nomor sekaligus:");
             if (mid) state.pendingMessage[userId] = mid;
         } else {
             await tg.tgSend(userId, "❌ Anda tidak memiliki akses untuk perintah ini.");
@@ -85,16 +78,42 @@ async function processCommand(msg) {
         return;
     }
 
-    // --- PERINTAH /SETDANA ---
-    if (text === "/setdana") {
-        state.waitingDanaInput.add(userId);
-        await tg.tgSend(userId, "Silahkan kirim dana dalam format:\n\n<code>08123456789\nNama Pemilik</code>");
+    // --- LOGIKA AUTO-RANGE (DIRECT INPUT) ---
+    if (isManualRange) {
+        // Hapus pesan input user agar chat bersih
+        try { await tg.tgDelete(chatId, msg.message_id); } catch (e) {}
+
+        // Hapus pesan bot sebelumnya jika ada di state
+        if (state.pendingMessage[userId]) {
+            try { await tg.tgDelete(chatId, state.pendingMessage[userId]); } catch (e) {}
+            delete state.pendingMessage[userId];
+        }
+
+        // Cek Verifikasi Grup
+        const isMember = await tg.isUserInBothGroups(userId);
+        if (!isMember) {
+            const midErr = await tg.tgSend(userId, "❌ Silahkan verifikasi /start dulu.");
+            state.pendingMessage[userId] = midErr;
+            return;
+        }
+
+        state.verifiedUsers.add(userId);
+        state.get10RangeInput.delete(userId);
+        state.manualRangeInput.delete(userId);
+
+        // Tentukan jumlah klik (10 jika dari state get10, else 1)
+        const count = state.get10RangeInput.has(userId) ? 10 : 1;
+        
+        // Kirim loading bar baru
+        const midLoading = await tg.tgSend(chatId, scraper.getProgressMessage(0, 0, text, count));
+        state.pendingMessage[userId] = midLoading;
+
+        // Jalankan Scraper
+        scraper.processUserInput(userId, text, count, usernameTg, firstName, midLoading);
         return;
     }
 
-    // --- LOGIKA INPUT STATE (WAITING INPUT) ---
-    
-    // 1. State Input Range Admin
+    // --- STATE INPUT HANDLING ---
     if (state.waitingAdminInput.has(userId)) {
         state.waitingAdminInput.delete(userId);
         const pMsgId = state.pendingMessage[userId];
@@ -103,7 +122,6 @@ async function processCommand(msg) {
         return;
     }
 
-    // 2. State Broadcast Admin
     if (state.waitingBroadcastInput.has(userId)) {
         state.waitingBroadcastInput.delete(userId);
         const pMsgId = state.broadcastMessage[userId];
@@ -112,91 +130,56 @@ async function processCommand(msg) {
         return;
     }
 
-    // 3. State Setup Dana
     if (state.waitingDanaInput.has(userId)) {
         const lines = text.split('\n');
         if (lines.length >= 2) {
-            const dNum = lines[0].trim();
-            const dName = lines.slice(1).join(' ').trim();
-            if (/^[\d+]+$/.test(dNum)) {
-                state.waitingDanaInput.delete(userId);
-                db.updateUserDana(userId, dNum, dName);
-                await tg.tgSend(userId, `✅ <b>Dana Berhasil Disimpan!</b>\n\nNo: ${dNum}\nA/N: ${dName}`);
-            } else {
-                await tg.tgSend(userId, "❌ Format salah. Baris pertama harus nomor.");
-            }
-        } else {
-            await tg.tgSend(userId, "❌ Kirim nomor dan nama (2 baris).");
+            state.waitingDanaInput.delete(userId);
+            db.updateUserDana(userId, lines[0].trim(), lines.slice(1).join(' ').trim());
+            await tg.tgSend(userId, `✅ Dana Berhasil Disimpan!`);
         }
         return;
     }
 
-    // 4. State Khusus /get10
-    if (state.get10RangeInput.has(userId)) {
-        state.get10RangeInput.delete(userId);
-        if (isManualRange) {
-            let mid = await tg.tgSend(chatId, scraper.getProgressMessage(0, 0, text, 10));
-            scraper.processUserInput(userId, text, 10, usernameTg, firstName, mid);
-        } else {
-            await tg.tgSend(chatId, "❌ Format Range tidak valid untuk /get10.");
-        }
-        return;
-    }
-
-    // --- LOGIKA AUTO-RANGE (DIRECT INPUT) ---
-    // Jika user mengetik range secara langsung (misal: 22898204XXX)
-    if (isManualRange) {
-        // Hapus dari state manual input jika ada (agar tidak bentrok)
-        state.manualRangeInput.delete(userId);
-        
-        // Cek Verifikasi (Opsional: Jika ingin paksa join grup dulu)
-        if (!state.verifiedUsers.has(userId)) {
-            const isMember = await tg.isUserInBothGroups(userId);
-            if (!isMember) {
-                return await tg.tgSend(userId, "❌ Silahkan ketik /start dan verifikasi grup terlebih dahulu.");
-            }
-            state.verifiedUsers.add(userId);
-        }
-
-        // Mulai proses scraping (1 nomor untuk input manual biasa)
-        let mid = await tg.tgSend(chatId, scraper.getProgressMessage(0, 0, text, 1));
-        scraper.processUserInput(userId, text, 1, usernameTg, firstName, mid);
+    if (text === "/setdana") {
+        state.waitingDanaInput.add(userId);
+        await tg.tgSend(userId, "Kirim format:\n<code>Nomor\nNama</code>");
         return;
     }
 
     // --- MENU /START ---
     if (text === "/start") {
+        // Hapus menu lama jika ada sebelum kirim yang baru
+        if (state.pendingMessage[userId]) {
+            try { await tg.tgDelete(chatId, state.pendingMessage[userId]); } catch (e) {}
+        }
+
         if (await tg.isUserInBothGroups(userId)) {
             state.verifiedUsers.add(userId);
             db.saveUsers(userId);
             const prof = db.getUserProfile(userId, firstName);
-            const fullName = usernameTg ? `${firstName} (@${usernameTg})` : firstName;
-            
             const msgProfile = `✅ <b>Verifikasi Berhasil, ${mention}</b>\n\n` +
-                `👤 <b>Profil Anda :</b>\n` +
-                `🔖 <b>Nama</b> : ${fullName}\n` +
-                `🧾 <b>Dana</b> : ${prof.dana}\n` +
-                `👤 <b>A/N</b> : ${prof.dana_an}\n` +
-                `📊 <b>Total OTP</b> : ${prof.otp_semua}\n` +
-                `💰 <b>Balance</b> : $${prof.balance.toFixed(6)}\n\n` +
-                `💡 <i>Tips: Langsung kirim range (ex: 228xxx) untuk get number!</i>`;
+                `💰 <b>Balance</b> : $${prof.balance.toFixed(6)}\n` +
+                `📊 <b>Total OTP</b> : ${prof.otp_semua}\n\n` +
+                `💡 <i>Kirim range (ex: 228xxx) untuk mulai!</i>`;
 
             const kb = {
                 inline_keyboard: [
                     [{ text: "📲 Get Number", callback_data: "getnum" }, { text: "👨‍💼 Admin", url: adminUrl }],
-                    [{ text: "💸 Withdraw Money", callback_data: "withdraw_menu" }]
+                    [{ text: "💸 Withdraw", callback_data: "withdraw_menu" }]
                 ]
             };
-            await tg.tgSend(userId, msgProfile, kb);
+            const midStart = await tg.tgSend(userId, msgProfile, kb);
+            state.pendingMessage[userId] = midStart; // Simpan agar bisa dihapus saat user input range
         } else {
             const kb = {
                 inline_keyboard: [
                     [{ text: "📌 Gabung Grup 1", url: groupLink1 }],
                     [{ text: "📌 Gabung Grup 2", url: config.GROUP_LINK_2 }],
-                    [{ text: "✅ Verifikasi Ulang", callback_data: "verify" }]
+                    [{ text: "✅ Verifikasi", callback_data: "verify" }]
                 ]
             };
-            await tg.tgSend(userId, `Halo ${mention} 👋\nHarap gabung grup untuk menggunakan bot:`, kb);
+            const midVerify = await tg.tgSend(userId, `Halo ${mention}, gabung grup dulu:`, kb);
+            state.pendingMessage[userId] = midVerify;
         }
     }
 }
