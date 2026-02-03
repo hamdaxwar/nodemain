@@ -7,12 +7,11 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 // ================= Konfigurasi Global =================
-// Mengambil konfigurasi dari bot_config.json
 const CONFIG_FILE = "bot_config.json";
 const botConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
 
-// Menggunakan BOT_TOKEN_GETNUM sesuai instruksi
 const BOT_TOKEN = botConfig.BOT_TOKEN_GETNUM; 
+const ADMIN_ID = botConfig.ADMIN_ID; // Mengambil ID Admin dari config
 const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 const WAIT_TIMEOUT_SECONDS = parseInt(process.env.WAIT_TIMEOUT_SECONDS || "1800");
@@ -23,60 +22,37 @@ const SMC_FILE = "smc.json";
 const WAIT_FILE = "wait.json";
 const PROFILE_FILE = "profile.json";
 const SETTINGS_FILE = "settings.json";
-
-// Update Link Donasi
 const DONATE_LINK = "https://zurastore.my.id/donate/";
+
+let offset = 0; // Untuk tracking pesan masuk
 
 // ================= Fungsi Utilitas =================
 
-/**
- * Helper: Membersihkan nomor telepon agar hanya tersisa angka
- */
 function normalize(phone) {
     if (!phone) return "";
     return String(phone).replace(/[^\d]/g, '');
 }
 
-/**
- * Helper: Escape HTML untuk Telegram
- */
 function escapeHtml(text) {
     if (!text) return "";
-    return text
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/**
- * Helper: Load JSON
- */
 function loadJson(filename, defaultVal = []) {
     if (fs.existsSync(filename)) {
         try {
-            const data = fs.readFileSync(filename, 'utf8');
-            return JSON.parse(data);
-        } catch (e) {
-            return defaultVal;
-        }
+            return JSON.parse(fs.readFileSync(filename, 'utf8'));
+        } catch (e) { return defaultVal; }
     }
     return defaultVal;
 }
 
-/**
- * Helper: Save JSON
- */
 function saveJson(filename, data) {
     try {
         fs.writeFileSync(filename, JSON.stringify(data, null, 2));
-    } catch (e) {
-        console.error(`[ERROR] Gagal menyimpan ${filename}:`, e.message);
-    }
+    } catch (e) { console.error(`[ERROR] Gagal simpan ${filename}:`, e.message); }
 }
 
-/**
- * Helper: API Telegram dengan Error Handling 429
- */
 async function tgApi(method, data) {
     try {
         const response = await axios.post(`${API}/${method}`, data, { timeout: 10000 });
@@ -84,7 +60,6 @@ async function tgApi(method, data) {
     } catch (e) {
         if (e.response && e.response.status === 429) {
             const retryAfter = (e.response.data.parameters?.retry_after || 5) * 1000;
-            console.log(`[SMS-API] Rate limit terdeteksi. Menunggu ${retryAfter/1000}s...`);
             await new Promise(r => setTimeout(r, retryAfter));
             return tgApi(method, data);
         }
@@ -92,26 +67,46 @@ async function tgApi(method, data) {
     }
 }
 
-/**
- * Helper: Update Profile & Saldo
- */
+// ================= Handler Command Admin =================
+
+async function handleCommands() {
+    const updates = await tgApi("getUpdates", { offset: offset, timeout: 10 });
+    if (!updates || !updates.result) return;
+
+    for (const update of updates.result) {
+        offset = update.update_id + 1;
+        const msg = update.message;
+        if (!msg || !msg.text) continue;
+
+        const chatId = String(msg.chat.id);
+        const text = msg.text.toLowerCase();
+
+        // Hanya Admin yang boleh akses
+        if (chatId !== String(ADMIN_ID)) continue;
+
+        if (text === "/onbalance") {
+            saveJson(SETTINGS_FILE, { balance_enabled: true });
+            await tgApi("sendMessage", { chat_id: chatId, text: "✅ <b>Sistem Balance DIAKTIFKAN</b>", parse_mode: "HTML" });
+        } 
+        else if (text === "/offbalance") {
+            saveJson(SETTINGS_FILE, { balance_enabled: false });
+            await tgApi("sendMessage", { chat_id: chatId, text: "❌ <b>Sistem Balance DINONAKTIFKAN</b>", parse_mode: "HTML" });
+        }
+    }
+}
+
+// ================= Logika Utama Monitor =================
+
 function updateProfileOtp(userId) {
     const profiles = loadJson(PROFILE_FILE, {});
     const strId = String(userId);
     const today = new Date().toISOString().split('T')[0];
 
     if (!profiles[strId]) {
-        profiles[strId] = {
-            name: "User",
-            balance: 0.0,
-            otp_semua: 0,
-            otp_hari_ini: 0,
-            last_active: today
-        };
+        profiles[strId] = { name: "User", balance: 0.0, otp_semua: 0, otp_hari_ini: 0, last_active: today };
     }
 
     const p = profiles[strId];
-
     if (p.last_active !== today) {
         p.otp_hari_ini = 0;
         p.last_active = today;
@@ -126,11 +121,8 @@ function updateProfileOtp(userId) {
     return { old: oldBal, new: p.balance };
 }
 
-// ================= Logika Utama Monitor =================
-
 async function checkAndForward() {
     const globalSettings = loadJson(SETTINGS_FILE, { balance_enabled: true });
-    
     const waitList = loadJson(WAIT_FILE, []);
     if (waitList.length === 0) return;
 
@@ -154,11 +146,7 @@ async function checkAndForward() {
         }
 
         if (currentTime - startTs > WAIT_TIMEOUT_SECONDS) {
-            await tgApi("sendMessage", {
-                chat_id: userId,
-                text: `⚠️ <b>Waktu Habis</b>\nNomor <code>${waitItem.number}</code> dihapus dari antrean.`,
-                parse_mode: "HTML"
-            });
+            await tgApi("sendMessage", { chat_id: userId, text: `⚠️ <b>Waktu Habis</b>\nNomor <code>${waitItem.number}</code> dihapus.`, parse_mode: "HTML" });
             continue;
         }
 
@@ -190,31 +178,11 @@ async function checkAndForward() {
                 balTxt = `$${bal.old.toFixed(6)} > $${bal.new.toFixed(6)}`;
             }
 
-            const msgBody = `🔔 <b>Pesan OTP Terdeteksi</b>\n\n` +
-                            `☎️ <b>Nomor:</b> <code>${waitItem.number}</code>\n` +
-                            `⚙️ <b>Service:</b> <b>${svc}</b>\n\n` +
-                            `💰 <b>Added:</b> ${balTxt}\n\n` +
-                            `🗯️ <b>Full Message:</b>\n` +
-                            `<blockquote>${raw}</blockquote>\n\n` +
-                            `⚡ <b>Tap the Button To Copy OTP</b> ⚡`;
+            const msgBody = `🔔 <b>Pesan OTP Terdeteksi</b>\n\n☎️ <b>Nomor:</b> <code>${waitItem.number}</code>\n⚙️ <b>Service:</b> <b>${svc}</b>\n\n💰 <b>Added:</b> ${balTxt}\n\n🗯️ <b>Full Message:</b>\n<blockquote>${raw}</blockquote>`;
+            const kb = { inline_keyboard: [[{ text: ` ${otp}`, copy_text: { text: otp } }, { text: "💸 Donate", url: DONATE_LINK }]] };
 
-            const kb = {
-                inline_keyboard: [[
-                    { text: ` ${otp}`, copy_text: { text: otp } },
-                    { text: "💸 Donate", url: DONATE_LINK }
-                ]]
-            };
-
-            const success = await tgApi("sendMessage", {
-                chat_id: userId,
-                text: msgBody,
-                reply_markup: kb,
-                parse_mode: "HTML"
-            });
-
-            if (success) {
-                waitItem.otp_received_time = currentTime;
-            }
+            const success = await tgApi("sendMessage", { chat_id: userId, text: msgBody, reply_markup: kb, parse_mode: "HTML" });
+            if (success) waitItem.otp_received_time = currentTime;
             newWaitList.push(waitItem);
         } else {
             newWaitList.push(waitItem);
@@ -225,22 +193,25 @@ async function checkAndForward() {
     saveJson(WAIT_FILE, newWaitList);
 }
 
-async function startMonitor() {
+// ================= Loop Utama =================
+
+async function start() {
     console.log("========================================");
-    console.log(`[STARTED] SMS Forwarder Active Loop`);
-    console.log(`[INFO] Using Token: ${BOT_TOKEN.substring(0, 10)}...`);
+    console.log(`[STARTED] SMS Forwarder & Admin Cmd`);
+    console.log(`[ADMIN ID] ${ADMIN_ID}`);
     console.log("========================================");
     
     if (fs.existsSync(SMC_FILE)) saveJson(SMC_FILE, []);
 
     while (true) {
         try {
-            await checkAndForward();
+            await handleCommands(); // Cek command /onbalance atau /offbalance
+            await checkAndForward(); // Cek SMS
         } catch (e) {
-            console.error(`[SMS LOOP ERROR]`, e.message);
+            console.error(`[LOOP ERROR]`, e.message);
         }
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 2000)); // Jeda 2 detik
     }
 }
 
-startMonitor();
+start();
