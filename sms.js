@@ -1,190 +1,246 @@
 const fs = require('fs');
-const axios = require('axios');
 const path = require('path');
-const config = require('./config'); 
-const { state } = require('./helpers/state'); 
+const axios = require('axios');
+const dotenv = require('dotenv');
 
-let smsLoop = null;
+// Load Env
+dotenv.config();
 
-const WAIT_TIMEOUT_SECONDS = 1800; 
+// ================= Konfigurasi Global =================
+// Mengambil konfigurasi dari bot_config.json
+const CONFIG_FILE = "bot_config.json";
+const botConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+
+// Menggunakan BOT_TOKEN_GETNUM sesuai instruksi
+const BOT_TOKEN = botConfig.BOT_TOKEN_GETNUM; 
+const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+const WAIT_TIMEOUT_SECONDS = parseInt(process.env.WAIT_TIMEOUT_SECONDS || "1800");
 const EXTENDED_WAIT_SECONDS = 300;
-const DELETE_DELAY_MS = 2000; // Jeda 2 detik sebelum hapus dari smc.json
+const OTP_REWARD_PRICE = 0.003500;
 
-// --- Helper JSON ---
+const SMC_FILE = "smc.json";
+const WAIT_FILE = "wait.json";
+const PROFILE_FILE = "profile.json";
+const SETTINGS_FILE = "settings.json";
+
+// Update Link Donasi
+const DONATE_LINK = "https://zurastore.my.id/donate/";
+
+// ================= Fungsi Utilitas =================
+
+/**
+ * Helper: Membersihkan nomor telepon agar hanya tersisa angka
+ */
+function normalize(phone) {
+    if (!phone) return "";
+    return String(phone).replace(/[^\d]/g, '');
+}
+
+/**
+ * Helper: Escape HTML untuk Telegram
+ */
+function escapeHtml(text) {
+    if (!text) return "";
+    return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+/**
+ * Helper: Load JSON
+ */
 function loadJson(filename, defaultVal = []) {
     if (fs.existsSync(filename)) {
-        try { return JSON.parse(fs.readFileSync(filename, 'utf8')); } catch (e) { return defaultVal; }
+        try {
+            const data = fs.readFileSync(filename, 'utf8');
+            return JSON.parse(data);
+        } catch (e) {
+            return defaultVal;
+        }
     }
     return defaultVal;
 }
 
+/**
+ * Helper: Save JSON
+ */
 function saveJson(filename, data) {
-    try { fs.writeFileSync(filename, JSON.stringify(data, null, 2)); } catch (e) { }
+    try {
+        fs.writeFileSync(filename, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.error(`[ERROR] Gagal menyimpan ${filename}:`, e.message);
+    }
 }
 
 /**
- * Update Profile & Balance menggunakan harga dari state
+ * Helper: API Telegram dengan Error Handling 429
+ */
+async function tgApi(method, data) {
+    try {
+        const response = await axios.post(`${API}/${method}`, data, { timeout: 10000 });
+        return response.data;
+    } catch (e) {
+        if (e.response && e.response.status === 429) {
+            const retryAfter = (e.response.data.parameters?.retry_after || 5) * 1000;
+            console.log(`[SMS-API] Rate limit terdeteksi. Menunggu ${retryAfter/1000}s...`);
+            await new Promise(r => setTimeout(r, retryAfter));
+            return tgApi(method, data);
+        }
+        return null;
+    }
+}
+
+/**
+ * Helper: Update Profile & Saldo
  */
 function updateProfileOtp(userId) {
-    const profiles = loadJson(state.FILES.PROFILE, {});
+    const profiles = loadJson(PROFILE_FILE, {});
     const strId = String(userId);
     const today = new Date().toISOString().split('T')[0];
 
     if (!profiles[strId]) {
-        profiles[strId] = { 
-            name: "User", 
-            balance: 0.0, 
-            otp_semua: 0, 
-            otp_hari_ini: 0, 
-            last_active: today 
+        profiles[strId] = {
+            name: "User",
+            balance: 0.0,
+            otp_semua: 0,
+            otp_hari_ini: 0,
+            last_active: today
         };
     }
-    const p = profiles[strId];
-    if (p.last_active !== today) { p.otp_hari_ini = 0; p.last_active = today; }
 
-    const oldBal = parseFloat(p.balance || 0.0);
-    const otpPrice = parseFloat(state.OTP_PRICE || 0.003500);
-    
+    const p = profiles[strId];
+
+    if (p.last_active !== today) {
+        p.otp_hari_ini = 0;
+        p.last_active = today;
+    }
+
+    const oldBal = p.balance || 0.0;
     p.otp_semua = (p.otp_semua || 0) + 1;
     p.otp_hari_ini = (p.otp_hari_ini || 0) + 1;
-    p.balance = oldBal + otpPrice;
+    p.balance = oldBal + OTP_REWARD_PRICE;
 
-    saveJson(state.FILES.PROFILE, profiles);
+    saveJson(PROFILE_FILE, profiles);
     return { old: oldBal, new: p.balance };
 }
 
-/**
- * Telegram API menggunakan Token Utama dari Ingatan Sesi (state)
- */
-async function tgApi(method, data) {
-    try {
-        // Menggunakan token utama GetNum dari state
-        const apiUrl = state.API_URL; 
-        if (!apiUrl) return;
-        await axios.post(`${apiUrl}/${method}`, data, { timeout: 10000 });
-    } catch (e) {}
-}
+// ================= Logika Utama Monitor =================
 
-/**
- * Logic Distribusi SMS
- */
 async function checkAndForward() {
-    const waitList = loadJson(state.FILES.WAIT, []);
+    const globalSettings = loadJson(SETTINGS_FILE, { balance_enabled: true });
+    
+    const waitList = loadJson(WAIT_FILE, []);
     if (waitList.length === 0) return;
 
-    let smsData = loadJson(state.FILES.SMC, []);
+    let smsData = loadJson(SMC_FILE, []);
     if (!Array.isArray(smsData)) smsData = [];
 
     let newWaitList = [];
     const currentTime = Date.now() / 1000;
+    let smsChanged = false;
 
     for (const waitItem of waitList) {
-        const waitNum = String(waitItem.number);
+        const waitNumClean = normalize(waitItem.number);
         const userId = waitItem.user_id;
         const startTs = waitItem.timestamp || 0;
         const otpRecTime = waitItem.otp_received_time;
 
-        // Jika sudah pernah terima OTP, biarkan di list selama masa extended
         if (otpRecTime) {
-            if (currentTime - otpRecTime <= EXTENDED_WAIT_SECONDS) newWaitList.push(waitItem);
+            if (currentTime - otpRecTime > EXTENDED_WAIT_SECONDS) continue;
+            newWaitList.push(waitItem);
             continue;
         }
 
-        // Cek Timeout
         if (currentTime - startTs > WAIT_TIMEOUT_SECONDS) {
             await tgApi("sendMessage", {
                 chat_id: userId,
-                text: `⚠️ <b>Waktu Habis</b>\nNomor <code>${waitNum}</code> telah kadaluarsa.`,
+                text: `⚠️ <b>Waktu Habis</b>\nNomor <code>${waitItem.number}</code> dihapus dari antrean.`,
                 parse_mode: "HTML"
             });
             continue;
         }
 
-        // Cari SMS yang cocok
-        const targetSmsIndex = smsData.findIndex(sms => {
-            const smsNum = String(sms.number || sms.Number || "");
-            return smsNum === waitNum || smsNum.includes(waitNum.replace('+', ''));
-        });
+        let targetSmsIndex = -1;
+        for (let i = 0; i < smsData.length; i++) {
+            const smsNumClean = normalize(smsData[i].number || smsData[i].Number);
+            if (smsNumClean === waitNumClean || smsNumClean.endsWith(waitNumClean) || waitNumClean.endsWith(smsNumClean)) {
+                targetSmsIndex = i;
+                break;
+            }
+        }
 
         if (targetSmsIndex !== -1) {
             const sms = smsData[targetSmsIndex];
+            smsData.splice(targetSmsIndex, 1);
+            smsChanged = true;
 
-            const otp = sms.otp || "N/A";
+            const otp = sms.otp || sms.OTP || "N/A";
             const svc = sms.service || "Unknown";
-            const raw = (sms.full_message || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            const raw = escapeHtml(sms.full_message || sms.FullMessage || "");
 
             let balTxt = "";
-            if (svc.toLowerCase().includes("whatsapp")) {
-                balTxt = "<i>WhatsApp OTP no balance</i>";
+            if (!globalSettings.balance_enabled) {
+                balTxt = "<b>Balance Sedang Nonaktif</b>";
+            } else if (svc.toLowerCase().includes("whatsapp")) {
+                balTxt = "<i>WhatsApp OTP (No Reward)</i>";
             } else {
                 const bal = updateProfileOtp(userId);
-                balTxt = `<code>$${bal.old.toFixed(6)}</code> → <code>$${bal.new.toFixed(6)}</code>`;
+                balTxt = `$${bal.old.toFixed(6)} > $${bal.new.toFixed(6)}`;
             }
 
-            const msgBody = `🔔 <b>New Message Detected</b>\n\n` +
-                            `☎️ <b>Nomor:</b> <code>${waitNum}</code>\n` +
+            const msgBody = `🔔 <b>Pesan OTP Terdeteksi</b>\n\n` +
+                            `☎️ <b>Nomor:</b> <code>${waitItem.number}</code>\n` +
                             `⚙️ <b>Service:</b> <b>${svc}</b>\n\n` +
                             `💰 <b>Added:</b> ${balTxt}\n\n` +
-                            `🗯️ <b>Full Message:</b>\n<blockquote>${raw}</blockquote>\n\n` +
-                            `⚡ <b>Tap OTP Untuk Copy</b> ⚡`;
+                            `🗯️ <b>Full Message:</b>\n` +
+                            `<blockquote>${raw}</blockquote>\n\n` +
+                            `⚡ <b>Tap the Button To Copy OTP</b> ⚡`;
 
-            const kb = { 
-                inline_keyboard: [
-                    [
-                        { text: `📋 ${otp}`, copy_text: { text: otp } }, 
-                        { text: "💸 Donate", url: "https://zurastore.my.id/donage" }
-                    ]
-                ] 
+            const kb = {
+                inline_keyboard: [[
+                    { text: ` ${otp}`, copy_text: { text: otp } },
+                    { text: "💸 Donate", url: DONATE_LINK }
+                ]]
             };
 
-            await tgApi("sendMessage", { 
-                chat_id: userId, 
-                text: msgBody, 
-                reply_markup: kb, 
-                parse_mode: "HTML" 
+            const success = await tgApi("sendMessage", {
+                chat_id: userId,
+                text: msgBody,
+                reply_markup: kb,
+                parse_mode: "HTML"
             });
 
-            // Tandai OTP diterima agar nomor tetap di list selama 5 menit (Extended)
-            waitItem.otp_received_time = currentTime;
+            if (success) {
+                waitItem.otp_received_time = currentTime;
+            }
             newWaitList.push(waitItem);
-
-            // JEDA 2 DETIK BARU HAPUS DARI SMC.JSON
-            setTimeout(() => {
-                let currentSms = loadJson(state.FILES.SMC, []);
-                // Filter ulang untuk membuang item yang sudah diproses berdasarkan timestamp/isi
-                const updatedSms = currentSms.filter(s => 
-                    !(String(s.number || s.Number).includes(waitNum.replace('+', '')) && (s.otp === otp))
-                );
-                saveJson(state.FILES.SMC, updatedSms);
-            }, DELETE_DELAY_MS);
-
         } else {
             newWaitList.push(waitItem);
         }
     }
 
-    saveJson(state.FILES.WAIT, newWaitList);
+    if (smsChanged) saveJson(SMC_FILE, smsData);
+    saveJson(WAIT_FILE, newWaitList);
 }
 
-/**
- * Module Controls
- */
-function start() {
-    if (smsLoop) return;
-    console.log("🚀 [SMS DISTRIBUTOR] Module Started (Memory Mode).");
-    smsLoop = setInterval(async () => {
-        // Hanya jalan jika bot utama running
-        if (!state.isBotRunning) return;
-        await checkAndForward();
-    }, 3000); // Interval 3 detik
-}
+async function startMonitor() {
+    console.log("========================================");
+    console.log(`[STARTED] SMS Forwarder Active Loop`);
+    console.log(`[INFO] Using Token: ${BOT_TOKEN.substring(0, 10)}...`);
+    console.log("========================================");
+    
+    if (fs.existsSync(SMC_FILE)) saveJson(SMC_FILE, []);
 
-function stop() {
-    if (smsLoop) {
-        clearInterval(smsLoop);
-        smsLoop = null;
-        console.log("🛑 [SMS DISTRIBUTOR] Module Stopped.");
+    while (true) {
+        try {
+            await checkAndForward();
+        } catch (e) {
+            console.error(`[SMS LOOP ERROR]`, e.message);
+        }
+        await new Promise(r => setTimeout(r, 3000));
     }
 }
 
-module.exports = { start, stop };
+startMonitor();
